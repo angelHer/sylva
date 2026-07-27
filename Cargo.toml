@@ -17,6 +17,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 git2 = { version = "0.19", default-features = false }
 thiserror = "1"
 notify = "8.2.0"
+# The "open a repository" dialog on the welcome screen. Default features use the
+# XDG desktop portal, which is pure Rust over D-Bus — no GTK, so the build stays
+# free of C dependencies beyond libgit2.
+rfd = "0.17"
 
 [dev-dependencies]
 tempfile = "3"

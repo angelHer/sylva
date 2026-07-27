@@ -11,6 +11,7 @@ pub mod graph_view;
 pub mod loader;
 pub mod sidebar;
 pub mod theme;
+pub mod welcome;
 pub mod worktree_form;
 
 pub use app::SylvaApp;

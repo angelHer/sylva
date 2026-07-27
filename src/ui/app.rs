@@ -13,13 +13,14 @@ use super::graph_view::GraphView;
 use super::loader::{self, LoadMessage, PendingLoad};
 use super::sidebar::{PanelAction, WorktreePanel};
 use super::theme::{self, Palette};
+use super::welcome::{Welcome, WelcomeAction};
 use super::worktree_form::{FormOutcome, WorktreeForm};
 use crate::application::{
     AddWorktree, AddWorktreeRequest, HistoryQuery, PruneWorktrees, RemoveWorktree,
     WorktreeOperations,
 };
 use crate::domain::{Ancestry, GraphLayout, Oid, RepositorySnapshot};
-use crate::infrastructure::{Git2Backend, GitCli, RepositoryWatcher};
+use crate::infrastructure::{Git2Backend, GitCli, RecentRepositories, RepositoryWatcher};
 
 const SIDEBAR_WIDTH: f32 = 250.0;
 const DETAIL_WIDTH: f32 = 320.0;
@@ -31,6 +32,8 @@ const DETAIL_WIDTH: f32 = 320.0;
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
 enum State {
+    /// No repository yet: offer the recent ones and a way to pick another.
+    Welcome,
     Loading,
     Ready {
         snapshot: Box<RepositorySnapshot>,
@@ -62,7 +65,9 @@ enum Operation {
 type OperationResult = Result<String, String>;
 
 pub struct SylvaApp {
-    repo_path: PathBuf,
+    /// `None` until a repository is chosen, which is how the window opens when
+    /// started from a desktop launcher.
+    repo_path: Option<PathBuf>,
     state: State,
     pending: Option<PendingLoad>,
     selected: Option<Oid>,
@@ -76,7 +81,14 @@ pub struct SylvaApp {
     /// The worktree awaiting a removal confirmation.
     confirming: Option<String>,
     form: Option<WorktreeForm>,
-    operations: Arc<GitCli>,
+    /// Bound to the open repository, so it exists only once there is one.
+    operations: Option<Arc<GitCli>>,
+    /// The repositories offered on the welcome screen.
+    recent: RecentRepositories,
+    /// A directory dialog waiting on the user. It runs on a worker thread
+    /// because the portal call blocks until they answer, which would otherwise
+    /// freeze the window behind it.
+    browsing: Option<Task<Option<PathBuf>>>,
     running: Option<Task<OperationResult>>,
     status: Option<(String, bool)>,
     watcher: Option<RepositoryWatcher>,
@@ -89,18 +101,20 @@ pub struct SylvaApp {
 impl SylvaApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        repo_path: PathBuf,
+        repo_path: Option<PathBuf>,
         query: HistoryQuery,
         screenshot: Option<PathBuf>,
         initial_focus: Option<String>,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
 
-        Self {
-            operations: Arc::new(GitCli::at(&repo_path)),
-            pending: Some(Self::start_load(&repo_path, query, &cc.egui_ctx)),
-            repo_path,
-            state: State::Loading,
+        let mut app = Self {
+            repo_path: None,
+            operations: None,
+            recent: RecentRepositories::load(),
+            browsing: None,
+            pending: None,
+            state: State::Welcome,
             selected: None,
             focus: None,
             scroll_to: None,
@@ -116,6 +130,110 @@ impl SylvaApp {
                 settle: 3,
                 requested: false,
             }),
+        };
+
+        if let Some(path) = repo_path {
+            app.open(path, query, &cc.egui_ctx);
+        }
+        app
+    }
+
+    /// Points the window at a repository and starts reading it.
+    ///
+    /// Everything derived from the previous repository is dropped here rather
+    /// than left to be noticed later: a stale watcher would report changes for
+    /// a directory nobody is looking at, and a stale selection would highlight
+    /// a commit that is not in the new history.
+    fn open(&mut self, path: PathBuf, query: HistoryQuery, ctx: &egui::Context) {
+        self.operations = Some(Arc::new(GitCli::at(&path)));
+        self.pending = Some(Self::start_load(&path, query, ctx));
+        self.repo_path = Some(path.clone());
+        self.state = State::Loading;
+        self.selected = None;
+        self.focus = None;
+        self.scroll_to = None;
+        self.confirming = None;
+        self.form = None;
+        self.status = None;
+        self.watcher = None;
+
+        // Remembered on open rather than on a successful load: a path that
+        // fails today may be a drive that is not mounted yet, and forgetting it
+        // would be the wrong lesson. Paths that stop being repositories are
+        // dropped the next time the list is read.
+        self.recent.record(&path);
+        if let Err(error) = self.recent.save() {
+            eprintln!("sylva: could not save the recent repository list: {error}");
+        }
+    }
+
+    /// Returns to the welcome screen, releasing the repository.
+    fn close_repository(&mut self) {
+        self.repo_path = None;
+        self.operations = None;
+        self.pending = None;
+        self.watcher = None;
+        self.selected = None;
+        self.focus = None;
+        self.confirming = None;
+        self.form = None;
+        self.status = None;
+        self.state = State::Welcome;
+        // Reread so a repository that has since been deleted stops being
+        // offered.
+        self.recent = RecentRepositories::load();
+    }
+
+    /// Asks the user for a directory, on a worker thread.
+    fn browse(&mut self, ctx: &egui::Context) {
+        if self.browsing.is_some() {
+            return;
+        }
+
+        // Start the dialog where the user most likely keeps their projects.
+        let start = self
+            .repo_path
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+
+        self.browsing = Some(background::spawn(
+            move || {
+                let mut dialog = rfd::FileDialog::new().set_title("Open a repository");
+                if let Some(start) = start {
+                    dialog = dialog.set_directory(start);
+                }
+                dialog.pick_folder()
+            },
+            ctx.clone(),
+        ));
+    }
+
+    fn poll_browse(&mut self, ctx: &egui::Context) {
+        let Some(browsing) = &mut self.browsing else {
+            return;
+        };
+
+        let chosen = match browsing.poll() {
+            Poll::Pending => return,
+            Poll::Ready(chosen) => chosen,
+            // The dialog could not be shown at all — no portal, no session bus.
+            // Say so, because silently doing nothing looks like a dead button.
+            Poll::Lost => {
+                self.browsing = None;
+                self.status = Some((
+                    "could not open the folder dialog; pass the repository path on the command line"
+                        .to_string(),
+                    true,
+                ));
+                return;
+            }
+        };
+        self.browsing = None;
+
+        // Cancelled: leave everything as it was.
+        if let Some(path) = chosen {
+            self.open(path, HistoryQuery::first_page(), ctx);
         }
     }
 
@@ -131,11 +249,10 @@ impl SylvaApp {
         if self.pending.is_some() {
             return; // Already on its way.
         }
-        self.pending = Some(Self::start_load(
-            &self.repo_path,
-            HistoryQuery::first_page(),
-            ctx,
-        ));
+        let Some(path) = &self.repo_path else {
+            return; // Nothing open to reload.
+        };
+        self.pending = Some(Self::start_load(path, HistoryQuery::first_page(), ctx));
     }
 
     fn poll_load(&mut self, ctx: &egui::Context) {
@@ -265,8 +382,12 @@ impl SylvaApp {
             return;
         };
 
+        let Some(operations) = &self.operations else {
+            return;
+        };
+
         let metadata = snapshot.metadata_only();
-        let operations = Arc::clone(&self.operations);
+        let operations = Arc::clone(operations);
 
         self.status = None;
         self.running = Some(background::spawn(
@@ -337,11 +458,33 @@ impl SylvaApp {
         self.running.is_some()
     }
 
-    fn title_bar(&self, ui: &mut egui::Ui) {
+    /// Draws the header. Returns whether the user asked to go back to the list
+    /// of repositories.
+    fn title_bar(&self, ui: &mut egui::Ui) -> bool {
+        let mut go_home = false;
+
         ui.horizontal(|ui| {
-            let name = self
-                .repo_path
-                .file_name()
+            go_home = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("repositories")
+                            .color(Palette::TEXT_DIM)
+                            .size(11.0),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Go back and open another repository")
+                .clicked();
+
+            // The snapshot's root is the primary checkout, which is the name
+            // worth showing: it stays the same whichever worktree was opened,
+            // and it survives being given a relative path like `.`.
+            let shown = match &self.state {
+                State::Ready { snapshot, .. } => Some(snapshot.root().as_path()),
+                _ => self.repo_path.as_deref(),
+            };
+            let name = shown
+                .and_then(Path::file_name)
                 .and_then(|n| n.to_str())
                 .unwrap_or("repository");
 
@@ -368,6 +511,8 @@ impl SylvaApp {
                 ui.spinner();
             }
         });
+
+        go_home
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
@@ -423,15 +568,20 @@ impl eframe::App for SylvaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_load(ctx);
         self.poll_operation(ctx);
+        self.poll_browse(ctx);
         self.poll_for_changes(ctx);
 
-        egui::TopBottomPanel::top("title")
-            .frame(
-                egui::Frame::none()
-                    .fill(Palette::PANEL)
-                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
-            )
-            .show(ctx, |ui| self.title_bar(ui));
+        let mut go_home = false;
+        if !matches!(self.state, State::Welcome) {
+            go_home = egui::TopBottomPanel::top("title")
+                .frame(
+                    egui::Frame::none()
+                        .fill(Palette::PANEL)
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                )
+                .show(ctx, |ui| self.title_bar(ui))
+                .inner;
+        }
 
         if self.status.is_some() {
             egui::TopBottomPanel::bottom("status")
@@ -481,9 +631,17 @@ impl eframe::App for SylvaApp {
                 });
         }
 
+        let mut welcome_action = WelcomeAction::None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Palette::BACKDROP))
             .show(ctx, |ui| match &self.state {
+                State::Welcome => {
+                    welcome_action = Welcome {
+                        recent: self.recent.entries(),
+                        browsing: self.browsing.is_some(),
+                    }
+                    .show(ui);
+                }
                 State::Loading => {
                     ui.centered_and_justified(|ui| {
                         ui.horizontal(|ui| {
@@ -497,8 +655,18 @@ impl eframe::App for SylvaApp {
                     });
                 }
                 State::Failed(error) => {
-                    ui.centered_and_justified(|ui| {
+                    // A failure has to offer a way out, or a launcher pointed at
+                    // a directory that is not a repository is a dead window.
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(ui.available_height() / 2.0 - 40.0);
                         ui.label(RichText::new(error).color(Palette::DANGER).size(13.0));
+                        ui.add_space(14.0);
+                        if ui
+                            .button(RichText::new("Choose another repository").size(12.0))
+                            .clicked()
+                        {
+                            welcome_action = WelcomeAction::Browse;
+                        }
                     });
                 }
                 State::Ready { snapshot, layout } => {
@@ -519,7 +687,7 @@ impl eframe::App for SylvaApp {
         if let Some(form) = &mut self.form {
             let root = match &self.state {
                 State::Ready { snapshot, .. } => snapshot.root().clone(),
-                _ => self.repo_path.clone(),
+                _ => self.repo_path.clone().unwrap_or_default(),
             };
 
             match form.show(ctx, &root) {
@@ -531,6 +699,22 @@ impl eframe::App for SylvaApp {
 
         if let Some(action) = action {
             self.apply(action, ctx);
+        }
+
+        match welcome_action {
+            WelcomeAction::None => {}
+            WelcomeAction::Open(path) => self.open(path, HistoryQuery::first_page(), ctx),
+            WelcomeAction::Browse => self.browse(ctx),
+            WelcomeAction::Forget(path) => {
+                self.recent.forget(&path);
+                if let Err(error) = self.recent.save() {
+                    eprintln!("sylva: could not save the recent repository list: {error}");
+                }
+            }
+        }
+
+        if go_home {
+            self.close_repository();
         }
 
         self.drive_capture(ctx);
