@@ -1,4 +1,7 @@
-//! gitgui — a fast, native Git client built around worktree visualization.
+//! sylva — a fast, native Git client built around worktrees.
+//!
+//! Named for the Latin for woodland: many trees sharing one ground, which is
+//! what a repository with worktrees is.
 //!
 //! Layering (dependencies point inwards only):
 //!
@@ -20,4 +23,4 @@ pub mod ui;
 pub use application::{GitError, HistoryQuery, LoadRepository};
 pub use domain::{GraphLayout, RepositorySnapshot};
 pub use infrastructure::Git2Backend;
-pub use ui::GitGuiApp;
+pub use ui::SylvaApp;

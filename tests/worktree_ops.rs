@@ -6,14 +6,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use gitgui::application::worktree_ops::{
+use sylva::application::worktree_ops::{
     AddWorktree, AddWorktreeRequest, PruneWorktrees, RemoveWorktree, WorktreeOpError,
     WorktreeOperations,
 };
-use gitgui::application::{HistoryQuery, LoadRepository};
-use gitgui::domain::{default_worktree_path, BranchName, RepositorySnapshot};
-use gitgui::infrastructure::GitCli;
-use gitgui::Git2Backend;
+use sylva::application::{HistoryQuery, LoadRepository};
+use sylva::domain::{default_worktree_path, BranchName, RepositorySnapshot};
+use sylva::infrastructure::GitCli;
+use sylva::Git2Backend;
 
 struct Fixture {
     _dir: tempfile::TempDir,

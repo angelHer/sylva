@@ -6,9 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use gitgui::application::ports::{HistoryQuery, RepositoryReader, WorktreeReader};
-use gitgui::domain::WorktreeHead;
-use gitgui::Git2Backend;
+use sylva::application::ports::{HistoryQuery, RepositoryReader, WorktreeReader};
+use sylva::domain::WorktreeHead;
+use sylva::Git2Backend;
 
 /// A throwaway repository on disk. The `TempDir` is kept alive by the struct;
 /// dropping it removes everything.
@@ -386,7 +386,7 @@ fn a_worktree_whose_directory_was_deleted_is_reported_as_prunable() {
 
 #[test]
 fn a_full_snapshot_ties_worktrees_to_the_commits_they_sit_on() {
-    use gitgui::{HistoryQuery as Query, LoadRepository};
+    use sylva::{HistoryQuery as Query, LoadRepository};
 
     let fixture = Fixture::new();
     let worktree = fixture.add_worktree("feature", "feature/graph");

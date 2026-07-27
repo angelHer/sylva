@@ -1,9 +1,9 @@
 [package]
-name = "gitgui"
+name = "sylva"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "A fast, native Git client focused on worktree visualization"
+description = "A fast, native Git client built around worktrees: many trees, one root"
 license = "MIT"
 
 [dependencies]

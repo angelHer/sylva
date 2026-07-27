@@ -13,4 +13,4 @@ pub mod sidebar;
 pub mod theme;
 pub mod worktree_form;
 
-pub use app::GitGuiApp;
+pub use app::SylvaApp;

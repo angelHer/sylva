@@ -4,11 +4,11 @@
 //! inspecting a repository without a compositor:
 //!
 //! ```text
-//! gitgui [PATH]              open the window
-//! gitgui --cli [PATH]        print the graph as text
-//! gitgui --profile [PATH]    time the load and layout paths
-//! gitgui --full              load all history instead of the first page
-//! gitgui --focus NAME        open with one worktree's history highlighted
+//! sylva [PATH]              open the window
+//! sylva --cli [PATH]        print the graph as text
+//! sylva --profile [PATH]    time the load and layout paths
+//! sylva --full              load all history instead of the first page
+//! sylva --focus NAME        open with one worktree's history highlighted
 //! ```
 
 mod cli;
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use eframe::egui;
-use gitgui::{GitGuiApp, HistoryQuery};
+use sylva::{HistoryQuery, SylvaApp};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -70,20 +70,20 @@ fn run_window(
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([880.0, 560.0])
-            .with_title("gitgui"),
+            .with_title("sylva"),
         ..Default::default()
     };
 
     let result = eframe::run_native(
-        "gitgui",
+        "sylva",
         options,
-        Box::new(move |cc| Ok(Box::new(GitGuiApp::new(cc, path, query, screenshot, focus)))),
+        Box::new(move |cc| Ok(Box::new(SylvaApp::new(cc, path, query, screenshot, focus)))),
     );
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("gitgui: {error}");
+            eprintln!("sylva: {error}");
             ExitCode::FAILURE
         }
     }

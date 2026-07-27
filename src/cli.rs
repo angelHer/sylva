@@ -6,9 +6,9 @@
 
 use std::process::ExitCode;
 
-use gitgui::application::ports::{RepositoryReader, WorktreeReader};
-use gitgui::domain::{GraphLayout, GraphRow, RepositorySnapshot};
-use gitgui::{Git2Backend, HistoryQuery, LoadRepository};
+use sylva::application::ports::{RepositoryReader, WorktreeReader};
+use sylva::domain::{GraphLayout, GraphRow, RepositorySnapshot};
+use sylva::{Git2Backend, HistoryQuery, LoadRepository};
 
 pub fn run(args: &[String]) -> ExitCode {
     let full = args.iter().any(|a| a == "--full");
@@ -22,7 +22,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let backend = match Git2Backend::discover(&path) {
         Ok(backend) => backend,
         Err(error) => {
-            eprintln!("gitgui: {error}");
+            eprintln!("sylva: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -98,7 +98,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let snapshot = match LoadRepository::new(reader, worktrees).execute(&query) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            eprintln!("gitgui: {error}");
+            eprintln!("sylva: {error}");
             return ExitCode::FAILURE;
         }
     };

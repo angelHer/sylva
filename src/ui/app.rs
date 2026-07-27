@@ -61,7 +61,7 @@ enum Operation {
 /// The outcome of an operation, in words meant for the status bar.
 type OperationResult = Result<String, String>;
 
-pub struct GitGuiApp {
+pub struct SylvaApp {
     repo_path: PathBuf,
     state: State,
     pending: Option<PendingLoad>,
@@ -86,7 +86,7 @@ pub struct GitGuiApp {
     capture: Option<Capture>,
 }
 
-impl GitGuiApp {
+impl SylvaApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         repo_path: PathBuf,
@@ -223,7 +223,7 @@ impl GitGuiApp {
             .find(|worktree| worktree.dir_name() == name)
             .and_then(|worktree| worktree.target())
         else {
-            eprintln!("gitgui: no worktree named {name}");
+            eprintln!("sylva: no worktree named {name}");
             return;
         };
 
@@ -415,7 +415,7 @@ fn run(
     }
 }
 
-impl eframe::App for GitGuiApp {
+impl eframe::App for SylvaApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         Palette::BACKDROP.to_normalized_gamma_f32()
     }
@@ -537,7 +537,7 @@ impl eframe::App for GitGuiApp {
     }
 }
 
-impl GitGuiApp {
+impl SylvaApp {
     /// Drives the `--screenshot` sequence, if one was asked for.
     fn drive_capture(&mut self, ctx: &egui::Context) {
         let Some(capture) = &mut self.capture else {
@@ -554,10 +554,10 @@ impl GitGuiApp {
 
         if let Some(color_image) = captured {
             if let Err(error) = write_png(&capture.path, &color_image) {
-                eprintln!("gitgui: could not write {}: {error}", capture.path.display());
+                eprintln!("sylva: could not write {}: {error}", capture.path.display());
             } else {
                 println!(
-                    "gitgui: wrote {} ({}x{})",
+                    "sylva: wrote {} ({}x{})",
                     capture.path.display(),
                     color_image.size[0],
                     color_image.size[1]
