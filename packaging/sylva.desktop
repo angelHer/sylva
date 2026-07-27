@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=sylva
+GenericName=Git Client
+Comment=A fast, native Git client built around worktrees
+# %f is the folder a file manager passes in; --welcome covers the other case,
+# where there is no path at all and the working directory is the user's home.
+Exec=sylva --welcome %f
+Icon=sylva
+Terminal=false
+Categories=Development;RevisionControl;
+# Lets a folder be opened with sylva from the file manager's context menu.
+MimeType=inode/directory;
+# Must match with_app_id in main.rs, or the shell shows a generic icon for the
+# window instead of pairing it with this launcher.
+StartupWMClass=sylva
+StartupNotify=true
+Keywords=git;worktree;branch;commit;repository;
