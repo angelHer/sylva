@@ -23,6 +23,11 @@ const NODE_RADIUS: f32 = 4.5;
 const LINE_WIDTH: f32 = 1.7;
 const CHIP_HEIGHT: f32 = 15.0;
 const CHIP_GAP: f32 = 5.0;
+/// The share of a row that chips may take before the rest is summarised.
+///
+/// A commit can carry a dozen refs, and without a limit they squeeze the
+/// message down to an ellipsis — hiding the one thing every row must show.
+const CHIP_BUDGET: f32 = 0.5;
 /// Horizontal room a chip's status dot needs.
 const DOT_SPACE: f32 = 11.0;
 
@@ -135,19 +140,11 @@ impl GraphView<'_> {
                     let mut x = rect.left() + graph_width;
                     x += draw_hash(&painter, row, x, center_y, in_focus);
 
-                    if let Some(branches) = branch_tips.get(&row.commit) {
-                        for branch in branches {
-                            x += chip(
-                                &painter,
-                                x,
-                                center_y,
-                                &branch.name,
-                                focus_aware(Palette::CYAN, in_focus),
-                                None,
-                            );
-                        }
-                    }
+                    let chip_limit = x + (rect.right() - x) * CHIP_BUDGET;
+                    let mut hidden = 0usize;
 
+                    // Worktree markers come first: they are the point of this
+                    // client, and a branch chip must never push one out.
                     if let Some(worktrees) = worktree_anchors.get(&row.commit) {
                         for worktree in worktrees {
                             let color = focus_aware(worktree_color(worktree), in_focus);
@@ -163,6 +160,34 @@ impl GraphView<'_> {
                                 Some(color),
                             );
                         }
+                    }
+
+                    if let Some(branches) = branch_tips.get(&row.commit) {
+                        for branch in branches {
+                            if x > chip_limit {
+                                hidden += 1;
+                                continue;
+                            }
+                            x += chip(
+                                &painter,
+                                x,
+                                center_y,
+                                &branch.name,
+                                focus_aware(Palette::CYAN, in_focus),
+                                None,
+                            );
+                        }
+                    }
+
+                    if hidden > 0 {
+                        x += chip(
+                            &painter,
+                            x,
+                            center_y,
+                            &format!("+{hidden}"),
+                            focus_aware(Palette::TEXT_DIM, in_focus),
+                            None,
+                        );
                     }
 
                     draw_summary(

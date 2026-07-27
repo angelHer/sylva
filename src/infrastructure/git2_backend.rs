@@ -385,8 +385,11 @@ impl WorktreeReader for Git2Backend {
                         name: name.to_string(),
                         path,
                         is_primary: false,
+                        // Its HEAD cannot be read because its directory is
+                        // gone. Naming it after the worktree would read as a
+                        // branch it never had.
                         head: WorktreeHead::Unborn {
-                            name: name.to_string(),
+                            name: "(unavailable)".to_string(),
                         },
                         status: WorktreeStatus::default(),
                         divergence: None,

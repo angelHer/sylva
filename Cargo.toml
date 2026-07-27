@@ -16,6 +16,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # network transports are dead weight. Re-enable when push/fetch lands.
 git2 = { version = "0.19", default-features = false }
 thiserror = "1"
+notify = "8.2.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -11,6 +11,7 @@ pub mod graph;
 pub mod oid;
 pub mod snapshot;
 pub mod worktree;
+pub mod worktree_request;
 
 pub use ancestry::Ancestry;
 pub use branch::{Branch, BranchKind, Divergence};
@@ -19,3 +20,4 @@ pub use graph::{GraphLayout, GraphRow, Segment, LANE_COLOR_COUNT};
 pub use oid::{Oid, OidParseError};
 pub use snapshot::RepositorySnapshot;
 pub use worktree::{Worktree, WorktreeHead, WorktreeStatus};
+pub use worktree_request::{default_worktree_path, BranchName, BranchNameError};

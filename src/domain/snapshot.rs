@@ -118,6 +118,24 @@ impl RepositorySnapshot {
         tips
     }
 
+    /// The same repository without its history: root, branches and worktrees
+    /// only.
+    ///
+    /// Guards on worktree operations look at refs and checkouts and never at
+    /// commits, so this is what gets handed to a worker thread. Cloning the
+    /// full snapshot to check whether a branch is already checked out would
+    /// copy tens of thousands of commits for a question about a dozen
+    /// directories.
+    pub fn metadata_only(&self) -> Self {
+        Self::new(
+            self.root.clone(),
+            Vec::new(),
+            self.branches.clone(),
+            self.worktrees.clone(),
+            self.truncated,
+        )
+    }
+
     pub fn primary_worktree(&self) -> Option<&Worktree> {
         self.worktrees.iter().find(|wt| wt.is_primary)
     }
@@ -291,6 +309,24 @@ mod tests {
         let flagged = snap.worktrees_needing_attention();
         assert_eq!(flagged.len(), 1);
         assert_eq!(flagged[0].name, "feature");
+    }
+
+    #[test]
+    fn a_metadata_only_copy_keeps_the_refs_and_checkouts_but_drops_the_history() {
+        let snap = snapshot();
+        let meta = snap.metadata_only();
+
+        assert_eq!(meta.commit_count(), 0);
+        assert_eq!(meta.root(), snap.root());
+        assert_eq!(meta.branches().len(), snap.branches().len());
+        assert_eq!(meta.worktrees().len(), snap.worktrees().len());
+    }
+
+    #[test]
+    fn a_metadata_only_copy_still_answers_which_worktree_is_primary() {
+        // This is what the worktree guards actually ask it.
+        let meta = snapshot().metadata_only();
+        assert_eq!(meta.primary_worktree().map(|wt| wt.name.as_str()), Some("main"));
     }
 
     #[test]

@@ -4,5 +4,9 @@
 //! changing nothing else.
 
 pub mod git2_backend;
+pub mod git_cli;
+pub mod watcher;
 
 pub use git2_backend::Git2Backend;
+pub use git_cli::GitCli;
+pub use watcher::RepositoryWatcher;

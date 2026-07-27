@@ -5,11 +5,9 @@
 //! work happens on a worker thread and arrives as a finished, immutable
 //! snapshot over a channel.
 
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
-
 use eframe::egui;
 
+use super::background::{self, Poll, Task};
 use crate::application::{GitError, HistoryQuery, LoadRepository, RepositoryReader, WorktreeReader};
 use crate::domain::{GraphLayout, RepositorySnapshot};
 
@@ -24,39 +22,23 @@ pub enum LoadMessage {
 
 /// A load in flight.
 pub struct PendingLoad {
-    receiver: Receiver<LoadMessage>,
-    finished: bool,
+    task: Task<LoadMessage>,
 }
 
 impl PendingLoad {
     /// Takes the result if the worker has finished, without ever blocking.
-    ///
-    /// Returns `None` while the load is still running, and keeps returning
-    /// `None` once a result has been taken.
     pub fn poll(&mut self) -> Option<LoadMessage> {
-        if self.finished {
-            return None;
-        }
-
-        match self.receiver.try_recv() {
-            Ok(message) => {
-                self.finished = true;
-                Some(message)
-            }
-            Err(TryRecvError::Empty) => None,
-            // The worker died without sending: report it rather than spinning
-            // forever on a channel that will never produce anything.
-            Err(TryRecvError::Disconnected) => {
-                self.finished = true;
-                Some(LoadMessage::Failed(
-                    "the repository worker stopped unexpectedly".to_string(),
-                ))
-            }
+        match self.task.poll() {
+            Poll::Pending => None,
+            Poll::Ready(message) => Some(message),
+            Poll::Lost => Some(LoadMessage::Failed(
+                "the repository worker stopped unexpectedly".to_string(),
+            )),
         }
     }
 
     pub fn is_running(&self) -> bool {
-        !self.finished
+        self.task.is_running()
     }
 }
 
@@ -71,32 +53,23 @@ where
     B: RepositoryReader + WorktreeReader + 'static,
     F: FnOnce() -> Result<B, GitError> + Send + 'static,
 {
-    let (sender, receiver) = mpsc::channel();
-
-    thread::spawn(move || {
-        let message = match load(make_backend, &query) {
+    let task = background::spawn(
+        move || match load(make_backend, &query) {
             Ok((snapshot, layout)) => LoadMessage::Loaded { snapshot, layout },
             Err(error) => LoadMessage::Failed(error.to_string()),
-        };
+        },
+        ctx,
+    );
 
-        // If the send fails the window is already gone; there is nothing to
-        // report to and nothing to clean up.
-        if sender.send(message).is_ok() {
-            // Wake the UI thread. Without this the result would sit in the
-            // channel until some unrelated input caused a repaint.
-            ctx.request_repaint();
-        }
-    });
-
-    PendingLoad {
-        receiver,
-        finished: false,
-    }
+    PendingLoad { task }
 }
 
 /// The layout is built here, on the worker, not on the UI thread: it is pure
 /// computation over the snapshot and the window should never pay for it.
-fn load<B, F>(make_backend: F, query: &HistoryQuery) -> Result<(RepositorySnapshot, GraphLayout), GitError>
+fn load<B, F>(
+    make_backend: F,
+    query: &HistoryQuery,
+) -> Result<(RepositorySnapshot, GraphLayout), GitError>
 where
     B: RepositoryReader + WorktreeReader,
     F: FnOnce() -> Result<B, GitError>,
@@ -184,51 +157,19 @@ mod tests {
     }
 
     #[test]
-    fn polling_a_finished_load_yields_the_result_once() {
-        let (sender, receiver) = mpsc::channel();
-        sender
-            .send(LoadMessage::Failed("boom".into()))
-            .expect("send");
+    fn an_empty_repository_loads_to_an_empty_snapshot_rather_than_an_error() {
+        let (snapshot, layout) = load(
+            || {
+                Ok(FakeBackend {
+                    root: PathBuf::from("/repo"),
+                    commits: vec![],
+                })
+            },
+            &HistoryQuery::full(),
+        )
+        .expect("an empty repository is not a failure");
 
-        let mut pending = PendingLoad {
-            receiver,
-            finished: false,
-        };
-
-        assert!(pending.is_running());
-        assert!(matches!(pending.poll(), Some(LoadMessage::Failed(_))));
-        assert!(!pending.is_running());
-        // Taking it again must not resurrect the result or panic.
-        assert!(pending.poll().is_none());
-    }
-
-    #[test]
-    fn a_worker_that_dies_without_sending_is_reported_rather_than_hung_on() {
-        let (sender, receiver) = mpsc::channel::<LoadMessage>();
-        drop(sender);
-
-        let mut pending = PendingLoad {
-            receiver,
-            finished: false,
-        };
-
-        match pending.poll() {
-            Some(LoadMessage::Failed(message)) => assert!(message.contains("stopped")),
-            _ => panic!("expected a failure once the worker is gone"),
-        }
-        assert!(!pending.is_running());
-    }
-
-    #[test]
-    fn a_load_still_running_reports_nothing_and_stays_pending() {
-        let (_sender, receiver) = mpsc::channel::<LoadMessage>();
-
-        let mut pending = PendingLoad {
-            receiver,
-            finished: false,
-        };
-
-        assert!(pending.poll().is_none());
-        assert!(pending.is_running());
+        assert_eq!(snapshot.commit_count(), 0);
+        assert!(layout.is_empty());
     }
 }
