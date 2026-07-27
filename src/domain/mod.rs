@@ -6,12 +6,14 @@
 
 pub mod branch;
 pub mod commit;
+pub mod graph;
 pub mod oid;
 pub mod snapshot;
 pub mod worktree;
 
 pub use branch::{Branch, BranchKind, Divergence};
 pub use commit::{Commit, Signature, Timestamp};
+pub use graph::{GraphLayout, GraphRow, Segment, LANE_COLOR_COUNT};
 pub use oid::{Oid, OidParseError};
 pub use snapshot::RepositorySnapshot;
 pub use worktree::{Worktree, WorktreeHead, WorktreeStatus};
