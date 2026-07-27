@@ -2,11 +2,15 @@
 name = "gitgui"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.76"
+rust-version = "1.85"
 description = "A fast, native Git client focused on worktree visualization"
 license = "MIT"
 
 [dependencies]
+eframe = "0.29.1"
+# Already pulled in by eframe, declared here so `--screenshot` can encode the
+# captured framebuffer. Costs nothing extra to build.
+image = { version = "0.25", default-features = false, features = ["png"] }
 # default-features = false drops the ssh/https transports (and with them the
 # openssl/libssh2 build chain). v1 is read-only over local repositories, so the
 # network transports are dead weight. Re-enable when push/fetch lands.

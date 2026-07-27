@@ -15,7 +15,9 @@
 pub mod application;
 pub mod domain;
 pub mod infrastructure;
+pub mod ui;
 
 pub use application::{GitError, HistoryQuery, LoadRepository};
-pub use domain::RepositorySnapshot;
+pub use domain::{GraphLayout, RepositorySnapshot};
 pub use infrastructure::Git2Backend;
+pub use ui::GitGuiApp;
