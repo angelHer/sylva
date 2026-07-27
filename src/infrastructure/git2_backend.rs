@@ -235,6 +235,14 @@ impl RepositoryReader for Git2Backend {
             // Topological order keeps parents below children; the time key
             // breaks ties so independent branches interleave by date, which is
             // what makes the graph readable.
+            //
+            // It is not free. Measured on a 50k-commit repository, warm, best
+            // of nine runs: 92ms against 71ms for a 5,000-commit page, and
+            // 408ms against 369ms for all of it. Dropping to date order buys
+            // roughly 20ms on the page the window opens with — paid for by
+            // letting a child appear below its own parent whenever a commit
+            // carries a skewed clock. On a worker thread that is a bad trade,
+            // so the ordering guarantee stays.
             walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
                 .map_err(|e| GitError::backend("revwalk sorting", e.message()))?;
 

@@ -73,9 +73,10 @@ pub struct GraphRow {
     /// Index into the lane palette.
     pub color: usize,
     pub is_merge: bool,
-    /// A parent of this commit is missing from the snapshot because the walk
-    /// was truncated. The renderer should fade the line out rather than
-    /// pretend history ends here.
+    /// This commit has a parent the graph draws no line to: either the walk
+    /// was truncated before reaching it, or it arrived earlier in the page.
+    /// The renderer should fade the line out rather than pretend history ends
+    /// here.
     pub has_dangling_parent: bool,
     /// Every line crossing the gap between the previous row and this one.
     /// Empty for the first row.
@@ -100,9 +101,10 @@ struct LaneSlot {
 impl GraphLayout {
     /// Lays out the snapshot's commits.
     ///
-    /// Assumes `snapshot.commits()` is newest-first and topologically
-    /// consistent — every commit appears before its parents. That is what the
-    /// `git2` adapter's revwalk produces.
+    /// Input is expected newest-first, but correctness does not depend on it:
+    /// a lane is only opened for a parent that actually appears further down
+    /// the list. Commits arriving out of order simply lose that line rather
+    /// than corrupting the layout.
     pub fn build(snapshot: &RepositorySnapshot) -> Self {
         let mut lanes: Vec<Option<LaneSlot>> = Vec::new();
         let mut rows: Vec<GraphRow> = Vec::with_capacity(snapshot.commit_count());
@@ -113,7 +115,7 @@ impl GraphLayout {
         let mut pending: Vec<Segment> = Vec::new();
         let mut lane_count = 0usize;
 
-        for commit in snapshot.commits() {
+        for (row_index, commit) in snapshot.commits().iter().enumerate() {
             let claimed = lanes_awaiting(&lanes, &commit.id);
 
             // The leftmost waiting lane wins, so branch lines drift left and
@@ -153,10 +155,20 @@ impl GraphLayout {
                     continue;
                 }
 
-                // The parent was never loaded: the walk stopped short of it.
-                // No lane is opened, so truncation cannot leak lanes that wait
-                // forever.
-                if !snapshot.contains(parent) {
+                // Only follow a parent that appears further down the page.
+                //
+                // Two cases are rejected here. The parent may be missing
+                // entirely, because the walk was truncated. Or it may sit
+                // *above* this commit: history arrives in date order, and a
+                // commit written with a skewed clock can carry a timestamp
+                // later than its own child. Either way, opening a lane for it
+                // would leave that lane waiting for a commit that never
+                // arrives — a line drawn to the bottom of the graph forever.
+                let follows_here = snapshot
+                    .position_of(parent)
+                    .is_some_and(|position| position > row_index);
+
+                if !follows_here {
                     has_dangling_parent = true;
                     continue;
                 }
@@ -511,6 +523,21 @@ mod tests {
             layout.trailing().is_empty(),
             "a missing parent must not leave a lane waiting forever"
         );
+    }
+
+    #[test]
+    fn a_parent_listed_above_its_own_child_opens_no_lane() {
+        // History arrives in date order. A commit written with a skewed clock
+        // can carry a timestamp later than its child's, landing above it. The
+        // line is dropped rather than left waiting forever.
+        let layout = layout_of(vec![commit(1, &[]), commit(2, &[1])]);
+
+        assert!(layout.row(1).unwrap().has_dangling_parent);
+        assert!(
+            layout.trailing().is_empty(),
+            "an out-of-order parent must not leave a lane open"
+        );
+        assert_eq!(layout.lane_count(), 1);
     }
 
     #[test]

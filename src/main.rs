@@ -12,7 +12,14 @@ use gitgui::domain::{GraphLayout, GraphRow, RepositorySnapshot};
 use gitgui::{Git2Backend, HistoryQuery, LoadRepository};
 
 fn main() -> ExitCode {
-    let path = env::args().nth(1).unwrap_or_else(|| ".".to_string());
+    let args: Vec<String> = env::args().skip(1).collect();
+    let full = args.iter().any(|a| a == "--full");
+    let quiet = args.iter().any(|a| a == "--quiet");
+    let path = args
+        .iter()
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
 
     let backend = match Git2Backend::discover(&path) {
         Ok(backend) => backend,
@@ -25,24 +32,101 @@ fn main() -> ExitCode {
     let reader: &dyn RepositoryReader = &backend;
     let worktrees: &dyn WorktreeReader = &backend;
 
+    let query = if full {
+        HistoryQuery::full()
+    } else {
+        HistoryQuery::first_page()
+    };
+
+    // Times each port call on its own, to find which part of the load
+    // dominates. Temporary, like the rest of this binary.
+    if args.iter().any(|a| a == "--profile") {
+        // Repeated runs, reported as min/median. A single timing on a machine
+        // with other work running measures the noise, not the code: observed
+        // spread on this workload reached 60% between identical runs.
+        const RUNS: usize = 9;
+
+        let mut cold = None;
+        let mut samples = Vec::with_capacity(RUNS);
+        let mut rows = 0;
+
+        for run in 0..RUNS {
+            let started = std::time::Instant::now();
+            let page = reader.commits(&query).expect("commits");
+            let elapsed = started.elapsed();
+            rows = page.commits.len();
+
+            // The first run also pays for warming the object store.
+            if run == 0 {
+                cold = Some(elapsed);
+            } else {
+                samples.push(elapsed);
+            }
+        }
+
+        samples.sort_unstable();
+        println!("rows            {rows}");
+        println!("commits() cold  {:>10.1?}", cold.expect("one run"));
+        println!("commits() min   {:>10.1?}", samples[0]);
+        println!("commits() med   {:>10.1?}", samples[samples.len() / 2]);
+        println!("commits() max   {:>10.1?}", samples[samples.len() - 1]);
+
+        let mut layout_samples = Vec::with_capacity(RUNS);
+        let snapshot = LoadRepository::new(reader, worktrees)
+            .execute(&query)
+            .expect("snapshot");
+        for _ in 0..RUNS {
+            let started = std::time::Instant::now();
+            let layout = GraphLayout::build(&snapshot);
+            layout_samples.push(started.elapsed());
+            std::hint::black_box(layout);
+        }
+        layout_samples.sort_unstable();
+        println!("layout    min   {:>10.1?}", layout_samples[0]);
+        println!("layout    med   {:>10.1?}", layout_samples[layout_samples.len() / 2]);
+
+        let started = std::time::Instant::now();
+        let branches = reader.branches().expect("branches");
+        println!("branches()  {:>10.1?}  ({} refs)", started.elapsed(), branches.len());
+
+        let started = std::time::Instant::now();
+        let trees = worktrees.worktrees().expect("worktrees");
+        println!("worktrees() {:>10.1?}  ({} trees)", started.elapsed(), trees.len());
+
+        return ExitCode::SUCCESS;
+    }
+
     let started = std::time::Instant::now();
-    let snapshot = match LoadRepository::new(reader, worktrees).execute(&HistoryQuery::first_page())
-    {
+    let snapshot = match LoadRepository::new(reader, worktrees).execute(&query) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             eprintln!("gitgui: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let elapsed = started.elapsed();
+    let load_time = started.elapsed();
 
-    print_snapshot(&snapshot);
-    println!("\nloaded in {:.1?}", elapsed);
+    let started = std::time::Instant::now();
+    let layout = GraphLayout::build(&snapshot);
+    let layout_time = started.elapsed();
+
+    if !quiet {
+        print_snapshot(&snapshot, &layout);
+    }
+
+    println!(
+        "\ncommits {} | lanes {} | load {:.1?} | layout {:.1?} | total {:.1?}",
+        snapshot.commit_count(),
+        layout.lane_count(),
+        load_time,
+        layout_time,
+        load_time + layout_time
+    );
 
     ExitCode::SUCCESS
 }
 
-fn print_snapshot(snapshot: &RepositorySnapshot) {
+fn print_snapshot(snapshot: &RepositorySnapshot, layout: &GraphLayout) {
     println!("repository: {}", snapshot.root().display());
     println!(
         "commits:    {}{}",
@@ -90,7 +174,6 @@ fn print_snapshot(snapshot: &RepositorySnapshot) {
         }
     }
 
-    let layout = GraphLayout::build(snapshot);
     println!(
         "\ngraph: {} rows, {} lanes wide",
         layout.len(),
