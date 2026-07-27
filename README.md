@@ -44,11 +44,34 @@ details, and worktree add / remove / prune.
 **It does not (yet):** stage, commit, push, pull, merge, rebase, or show diffs.
 For those, the terminal is still where you go.
 
+## Installing
+
+```sh
+./install.sh
+```
+
+That builds a release binary and installs three things under your home
+directory, so no root is needed:
+
+| what | where |
+|---|---|
+| the binary | `~/.local/bin/sylva` |
+| the desktop entry | `~/.local/share/applications/sylva.desktop` |
+| the icon | `~/.local/share/icons/hicolor/scalable/apps/sylva.svg` |
+
+Afterwards you can run `sylva` in any repository, launch it from the
+applications menu, or right-click a folder in Files and pick **Open With ▸
+sylva**. `./install.sh --uninstall` removes all three.
+
+If `~/.local/bin` is not on your `PATH`, the script says so and tells you what
+to add.
+
 ## Building
 
 Requires a Rust toolchain and a C compiler. Nothing else — the `git2` dependency
 builds libgit2 from source with the network transports switched off, so there is
-no OpenSSL, no `pkg-config` and no `cmake` in the way.
+no OpenSSL, no `pkg-config` and no `cmake` in the way. The folder dialog goes
+through the XDG desktop portal over D-Bus, so it needs no GTK either.
 
 ```sh
 cargo build --release
@@ -63,12 +86,18 @@ does; nothing in it is Linux-specific except the assumption that `git` is on the
 
 ```
 sylva [PATH]                 open the window (PATH defaults to the current directory)
+sylva --welcome              start on the list of recent repositories
 sylva --focus NAME           open with one worktree's history highlighted
 sylva --full                 load all history instead of the first 5,000 commits
 sylva --cli [PATH]           print the graph as text
 sylva --profile [PATH]       time the load and layout paths
 sylva --screenshot FILE      render one frame to a PNG and exit
 ```
+
+Started with no path from a directory that is not a repository — which is what
+happens when the desktop launcher runs it — sylva opens on a welcome screen
+listing the last ten repositories you opened, with a button to pick another. The
+list lives in `~/.config/sylva/recent`, one path per line.
 
 `--cli` and `--screenshot` exist so the rendering and the Git layer can be
 checked without a person watching a screen. They found four bugs that no unit
