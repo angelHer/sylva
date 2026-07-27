@@ -1,0 +1,32 @@
+[package]
+name = "gitgui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.76"
+description = "A fast, native Git client focused on worktree visualization"
+license = "MIT"
+
+[dependencies]
+# default-features = false drops the ssh/https transports (and with them the
+# openssl/libssh2 build chain). v1 is read-only over local repositories, so the
+# network transports are dead weight. Re-enable when push/fetch lands.
+git2 = { version = "0.19", default-features = false }
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+# Dependencies are optimized even in dev builds: libgit2 walking a large
+# history is unusably slow at opt-level 0, and it is recompiled rarely.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2
