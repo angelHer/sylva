@@ -2,3 +2,6 @@
 **/*.rs.bk
 *.pdb
 .codegraph/
+
+# Local AI tooling, not part of the project
+.atl/
