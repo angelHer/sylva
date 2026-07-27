@@ -6,12 +6,24 @@ use eframe::egui::{self, Color32, RichText, Ui};
 use super::theme::Palette;
 use crate::domain::{Divergence, Oid, RepositorySnapshot, Worktree, WorktreeStatus};
 
+/// What the user asked for by clicking in the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelAction {
+    /// Highlight only what this commit can see.
+    Focus(Oid),
+    /// Go back to showing the whole history at full strength.
+    ClearFocus,
+}
+
 pub struct WorktreePanel<'a> {
     pub snapshot: &'a RepositorySnapshot,
+    /// The tip whose history is currently focused, if any.
+    pub focused: Option<Oid>,
 }
 
 impl WorktreePanel<'_> {
-    pub fn show(&self, ui: &mut Ui, selected: &mut Option<Oid>) {
+    pub fn show(&self, ui: &mut Ui, selected: &mut Option<Oid>) -> Option<PanelAction> {
+        let mut action = None;
         let worktrees = self.snapshot.worktrees();
 
         ui.horizontal(|ui| {
@@ -37,23 +49,46 @@ impl WorktreePanel<'_> {
             );
         }
 
+        if self.focused.is_some() {
+            ui.add_space(2.0);
+            if ui
+                .add(egui::Button::new(
+                    RichText::new("show all history").color(Palette::CYAN).size(10.5),
+                ))
+                .clicked()
+            {
+                action = Some(PanelAction::ClearFocus);
+            }
+        }
+
         ui.add_space(6.0);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for worktree in worktrees {
-                    self.show_worktree(ui, worktree, selected);
+                    if let Some(requested) = self.show_worktree(ui, worktree, selected) {
+                        action = Some(requested);
+                    }
                     ui.add_space(4.0);
                 }
             });
+
+        action
     }
 
-    fn show_worktree(&self, ui: &mut Ui, worktree: &Worktree, selected: &mut Option<Oid>) {
-        let is_selected = worktree.target().is_some() && worktree.target() == *selected;
+    fn show_worktree(
+        &self,
+        ui: &mut Ui,
+        worktree: &Worktree,
+        selected: &mut Option<Oid>,
+    ) -> Option<PanelAction> {
+        let target = worktree.target();
+        let is_selected = target.is_some() && target == *selected;
+        let is_focused = target.is_some() && target == self.focused;
 
         let frame = egui::Frame::none()
-            .fill(if is_selected {
+            .fill(if is_selected || is_focused {
                 Palette::SELECTED
             } else {
                 Palette::SURFACE
@@ -62,7 +97,7 @@ impl WorktreePanel<'_> {
             .inner_margin(egui::Margin::symmetric(8.0, 7.0))
             .stroke(egui::Stroke::new(
                 1.0_f32,
-                if is_selected {
+                if is_selected || is_focused {
                     Palette::CYAN
                 } else {
                     Palette::BORDER
@@ -118,16 +153,29 @@ impl WorktreePanel<'_> {
                     if worktree.is_prunable {
                         ui.label(RichText::new("prunable").color(Palette::DANGER).size(10.5));
                     }
+                    if is_focused {
+                        ui.label(RichText::new("focused").color(Palette::CYAN).size(10.5));
+                    }
                 });
             })
             .response
             .interact(egui::Sense::click());
 
-        // Clicking a worktree selects the commit it sits on, which highlights
-        // its position in the shared graph.
+        // Clicking a worktree jumps to the commit it sits on and focuses its
+        // history. Clicking the focused one again releases the focus, so the
+        // same gesture goes both ways.
         if response.clicked() {
-            *selected = worktree.target();
+            *selected = target;
+            return match target {
+                Some(_) if is_focused => Some(PanelAction::ClearFocus),
+                Some(oid) => Some(PanelAction::Focus(oid)),
+                // An unborn worktree sits on no commit; there is nothing to
+                // focus and nothing to jump to.
+                None => None,
+            };
         }
+
+        None
     }
 }
 

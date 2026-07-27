@@ -4,6 +4,7 @@
 //! in this module must stay compilable with zero external crates so the rules
 //! of the product can be tested without a repository on disk.
 
+pub mod ancestry;
 pub mod branch;
 pub mod commit;
 pub mod graph;
@@ -11,6 +12,7 @@ pub mod oid;
 pub mod snapshot;
 pub mod worktree;
 
+pub use ancestry::Ancestry;
 pub use branch::{Branch, BranchKind, Divergence};
 pub use commit::{Commit, Signature, Timestamp};
 pub use graph::{GraphLayout, GraphRow, Segment, LANE_COLOR_COUNT};

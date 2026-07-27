@@ -66,6 +66,34 @@ pub fn lane_glow(index: usize) -> Color32 {
     Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 38)
 }
 
+/// How much of a colour survives when a row falls outside the focused history.
+const FADED: f32 = 0.22;
+
+/// Fades a colour towards the backdrop.
+///
+/// Blending towards the background rather than lowering the alpha keeps the
+/// result opaque, so a faded line never shows whatever is drawn behind it.
+pub fn faded(color: Color32) -> Color32 {
+    let blend = |channel: u8, backdrop: u8| {
+        (channel as f32 * FADED + backdrop as f32 * (1.0 - FADED)).round() as u8
+    };
+
+    Color32::from_rgb(
+        blend(color.r(), Palette::BACKDROP.r()),
+        blend(color.g(), Palette::BACKDROP.g()),
+        blend(color.b(), Palette::BACKDROP.b()),
+    )
+}
+
+/// A colour, faded when `focused` is false.
+pub fn focus_aware(color: Color32, focused: bool) -> Color32 {
+    if focused {
+        color
+    } else {
+        faded(color)
+    }
+}
+
 /// Installs the theme. Call once, at startup.
 pub fn apply(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
@@ -153,6 +181,31 @@ mod tests {
             glow.r() >= glow.b() && glow.b() >= glow.g(),
             "premultiplication must not reorder the channels: {glow:?}"
         );
+    }
+
+    #[test]
+    fn fading_moves_a_colour_towards_the_backdrop_without_passing_it() {
+        let faded_cyan = faded(Palette::CYAN);
+        assert!(faded_cyan.g() < Palette::CYAN.g());
+        assert!(faded_cyan.g() > Palette::BACKDROP.g());
+    }
+
+    #[test]
+    fn a_faded_colour_stays_opaque() {
+        // Blending, not transparency: a faded line must not reveal what is
+        // drawn behind it.
+        assert_eq!(faded(Palette::CYAN).a(), 255);
+    }
+
+    #[test]
+    fn fading_the_backdrop_itself_changes_nothing() {
+        assert_eq!(faded(Palette::BACKDROP), Palette::BACKDROP);
+    }
+
+    #[test]
+    fn focus_aware_only_fades_what_is_out_of_focus() {
+        assert_eq!(focus_aware(Palette::CYAN, true), Palette::CYAN);
+        assert_eq!(focus_aware(Palette::CYAN, false), faded(Palette::CYAN));
     }
 
     #[test]

@@ -45,6 +45,17 @@ pub struct Segment {
     pub from_lane: usize,
     pub to_lane: usize,
     pub color: usize,
+    /// The commit that opened this line: the child end of the parent link it
+    /// draws.
+    ///
+    /// Carried so a caller can ask whether the line belongs to some particular
+    /// history. It is the *source* and not the destination on purpose. Lines
+    /// from unrelated branches all converge on their common ancestor, so
+    /// asking where a line is heading marks every one of them as part of any
+    /// history that reaches that ancestor. Asking where it came from does not,
+    /// and it loses nothing: a history closed under parents contains a line's
+    /// destination whenever it contains its source.
+    pub source: Oid,
 }
 
 impl Segment {
@@ -96,6 +107,8 @@ pub struct GraphLayout {
 struct LaneSlot {
     awaiting: Oid,
     color: usize,
+    /// The commit whose parent link this lane is drawing.
+    source: Oid,
 }
 
 impl GraphLayout {
@@ -179,6 +192,7 @@ impl GraphLayout {
                     lanes[lane] = Some(LaneSlot {
                         awaiting: *parent,
                         color,
+                        source: commit.id,
                     });
                     assigned.push(lane);
                     continued = true;
@@ -189,12 +203,12 @@ impl GraphLayout {
                     // Another line is already heading for this parent; join it
                     // rather than opening a duplicate lane.
                     Some(existing) => {
-                        let existing_color =
-                            lanes[existing].as_ref().expect("occupied lane").color;
+                        let slot = lanes[existing].as_ref().expect("occupied lane");
                         merge_links.push(Segment {
                             from_lane: lane,
                             to_lane: existing,
-                            color: existing_color,
+                            color: slot.color,
+                            source: commit.id,
                         });
                     }
                     None => {
@@ -202,6 +216,7 @@ impl GraphLayout {
                         lanes[new_lane] = Some(LaneSlot {
                             awaiting: *parent,
                             color: palette.take(),
+                            source: commit.id,
                         });
                         assigned.push(new_lane);
                     }
@@ -217,6 +232,7 @@ impl GraphLayout {
                     from_lane: if assigned.contains(&index) { lane } else { index },
                     to_lane: index,
                     color: slot.color,
+                    source: slot.source,
                 });
             }
             pending.extend(merge_links);
@@ -565,6 +581,81 @@ mod tests {
         assert_eq!(layout.rows_in_range(10, 20).len(), 0);
         // An inverted range yields nothing rather than panicking.
         assert_eq!(layout.rows_in_range(2, 1).len(), 0);
+    }
+
+    #[test]
+    fn a_line_records_the_commit_that_opened_it() {
+        let layout = layout_of(vec![commit(3, &[2]), commit(2, &[1]), commit(1, &[])]);
+
+        // The line arriving at row 1 was opened by the commit above it.
+        assert_eq!(layout.row(1).unwrap().incoming[0].source, oid(3));
+        assert_eq!(layout.row(2).unwrap().incoming[0].source, oid(2));
+    }
+
+    #[test]
+    fn a_line_passing_a_row_still_belongs_to_the_commit_that_opened_it() {
+        // The merge opens lane 1 to reach commit 3. While that line passes the
+        // row for commit 2 it still belongs to the merge, not to commit 2.
+        let layout = layout_of(vec![
+            commit(4, &[2, 3]),
+            commit(2, &[1]),
+            commit(3, &[1]),
+            commit(1, &[]),
+        ]);
+
+        let passing = layout
+            .row(1)
+            .unwrap()
+            .incoming
+            .iter()
+            .find(|segment| segment.to_lane == 1)
+            .expect("a line passing through lane 1");
+
+        assert_eq!(passing.source, oid(4));
+    }
+
+    #[test]
+    fn lines_converging_on_a_shared_parent_keep_separate_sources() {
+        // This is what lets one branch be highlighted without lighting up every
+        // other branch that shares its ancestor.
+        let layout = layout_of(vec![
+            commit(4, &[2, 3]),
+            commit(2, &[1]),
+            commit(3, &[1]),
+            commit(1, &[]),
+        ]);
+
+        let sources: HashSet<Oid> = layout
+            .row(3)
+            .unwrap()
+            .incoming
+            .iter()
+            .map(|segment| segment.source)
+            .collect();
+
+        assert_eq!(sources, HashSet::from([oid(2), oid(3)]));
+    }
+
+    #[test]
+    fn every_line_names_a_commit_that_is_in_the_snapshot() {
+        let layout = layout_of(vec![
+            commit(6, &[4, 5]),
+            commit(4, &[2, 3]),
+            commit(5, &[3]),
+            commit(2, &[1]),
+            commit(3, &[1]),
+            commit(1, &[]),
+        ]);
+
+        let ids: HashSet<Oid> = layout.rows().iter().map(|row| row.commit).collect();
+        for row in layout.rows() {
+            for segment in &row.incoming {
+                assert!(
+                    ids.contains(&segment.source),
+                    "line from nowhere: {segment:?}"
+                );
+            }
+        }
     }
 
     #[test]

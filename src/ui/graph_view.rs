@@ -9,8 +9,10 @@ use eframe::egui::{
 };
 use eframe::epaint::CubicBezierShape;
 
-use super::theme::{lane_color, lane_glow, Palette};
-use crate::domain::{GraphLayout, GraphRow, Oid, RepositorySnapshot, Segment, Worktree};
+use super::theme::{focus_aware, lane_color, lane_glow, Palette};
+use crate::domain::{
+    Ancestry, GraphLayout, GraphRow, Oid, RepositorySnapshot, Segment, Worktree,
+};
 
 /// Height of one commit row. Everything vertical is derived from this.
 pub const ROW_HEIGHT: f32 = 26.0;
@@ -32,6 +34,10 @@ pub fn graph_column_width(lane_count: usize) -> f32 {
 pub struct GraphView<'a> {
     pub snapshot: &'a RepositorySnapshot,
     pub layout: &'a GraphLayout,
+    /// When set, only this history is drawn at full strength.
+    pub focus: Option<&'a Ancestry>,
+    /// A row to bring into view on this frame, taken once and then cleared.
+    pub scroll_to: Option<usize>,
 }
 
 impl GraphView<'_> {
@@ -54,8 +60,16 @@ impl GraphView<'_> {
         // padding, so the gap between them is zero.
         ui.spacing_mut().item_spacing.y = 0.0;
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
+        let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+
+        // Centre the requested row rather than putting it at the top edge, so
+        // the commits around it stay visible and the jump keeps its context.
+        if let Some(row) = self.scroll_to {
+            let centred = row as f32 * ROW_HEIGHT - ui.available_height() / 2.0;
+            scroll_area = scroll_area.vertical_scroll_offset(centred.max(0.0));
+        }
+
+        scroll_area
             .show_rows(ui, ROW_HEIGHT, total_rows, |ui, range| {
                 let width = ui.available_width();
                 let (rect, _) = ui.allocate_exact_size(
@@ -66,6 +80,18 @@ impl GraphView<'_> {
 
                 let lane_x = |lane: usize| {
                     rect.left() + GRAPH_PADDING + lane as f32 * LANE_WIDTH + LANE_WIDTH / 2.0
+                };
+
+                // A line belongs to the focused history when the commit that
+                // opened it does. Judging it by where it is heading would light
+                // up every branch in the repository, since they all converge on
+                // a shared ancestor the focused worktree can see.
+                let segment_in_focus = |segment: &Segment| {
+                    self.focus.is_none_or(|ancestry| {
+                        self.snapshot
+                            .position_of(&segment.source)
+                            .is_some_and(|position| ancestry.includes_position(position))
+                    })
                 };
 
                 for (offset, index) in range.clone().enumerate() {
@@ -86,25 +112,45 @@ impl GraphView<'_> {
                         painter.rect_filled(row_rect, Rounding::ZERO, Palette::HOVER);
                     }
 
+                    // A row is in focus when no worktree is focused at all, or
+                    // when the focused worktree can see this commit.
+                    let in_focus = self
+                        .focus
+                        .is_none_or(|ancestry| ancestry.includes_position(index));
+
                     // Lines arriving from the row above.
                     for segment in &row.incoming {
-                        draw_segment(&painter, segment, &lane_x, center_y - ROW_HEIGHT, center_y);
+                        draw_segment(
+                            &painter,
+                            segment,
+                            &lane_x,
+                            center_y - ROW_HEIGHT,
+                            center_y,
+                            segment_in_focus(segment),
+                        );
                     }
 
-                    draw_node(&painter, row, lane_x(row.lane), center_y);
+                    draw_node(&painter, row, lane_x(row.lane), center_y, in_focus);
 
                     let mut x = rect.left() + graph_width;
-                    x += draw_hash(&painter, row, x, center_y);
+                    x += draw_hash(&painter, row, x, center_y, in_focus);
 
                     if let Some(branches) = branch_tips.get(&row.commit) {
                         for branch in branches {
-                            x += chip(&painter, x, center_y, &branch.name, Palette::CYAN, None);
+                            x += chip(
+                                &painter,
+                                x,
+                                center_y,
+                                &branch.name,
+                                focus_aware(Palette::CYAN, in_focus),
+                                None,
+                            );
                         }
                     }
 
                     if let Some(worktrees) = worktree_anchors.get(&row.commit) {
                         for worktree in worktrees {
-                            let color = worktree_color(worktree);
+                            let color = focus_aware(worktree_color(worktree), in_focus);
                             x += chip(
                                 &painter,
                                 x,
@@ -119,7 +165,15 @@ impl GraphView<'_> {
                         }
                     }
 
-                    draw_summary(&painter, self.snapshot, row, x, center_y, rect.right());
+                    draw_summary(
+                        &painter,
+                        self.snapshot,
+                        row,
+                        x,
+                        center_y,
+                        rect.right(),
+                        in_focus,
+                    );
                 }
 
                 // The row just below the viewport is not painted, so its
@@ -134,6 +188,7 @@ impl GraphView<'_> {
                             &lane_x,
                             bottom - ROW_HEIGHT / 2.0,
                             bottom + ROW_HEIGHT / 2.0,
+                            segment_in_focus(segment),
                         );
                     }
                 }
@@ -157,10 +212,11 @@ fn draw_segment(
     lane_x: &impl Fn(usize) -> f32,
     top_y: f32,
     bottom_y: f32,
+    in_focus: bool,
 ) {
     let from = Pos2::new(lane_x(segment.from_lane), top_y);
     let to = Pos2::new(lane_x(segment.to_lane), bottom_y);
-    let stroke = Stroke::new(LINE_WIDTH, lane_color(segment.color));
+    let stroke = Stroke::new(LINE_WIDTH, focus_aware(lane_color(segment.color), in_focus));
 
     if segment.is_straight() {
         painter.line_segment([from, to], stroke);
@@ -184,13 +240,16 @@ fn draw_segment(
     ));
 }
 
-fn draw_node(painter: &Painter, row: &GraphRow, x: f32, y: f32) {
+fn draw_node(painter: &Painter, row: &GraphRow, x: f32, y: f32, in_focus: bool) {
     let center = Pos2::new(x, y);
-    let color = lane_color(row.color);
+    let color = focus_aware(lane_color(row.color), in_focus);
 
     // A soft halo behind the node is what sells the neon look; it also
-    // separates the node from any line passing behind it.
-    painter.circle_filled(center, NODE_RADIUS * 2.4, lane_glow(row.color));
+    // separates the node from any line passing behind it. Out of focus there
+    // is no halo at all, which is most of what makes the focused history pop.
+    if in_focus {
+        painter.circle_filled(center, NODE_RADIUS * 2.4, lane_glow(row.color));
+    }
 
     if row.is_merge {
         // Hollow, so merges are findable at a glance while scrolling.
@@ -201,18 +260,11 @@ fn draw_node(painter: &Painter, row: &GraphRow, x: f32, y: f32) {
     }
 }
 
-fn draw_hash(painter: &Painter, row: &GraphRow, x: f32, center_y: f32) -> f32 {
-    let galley = painter.layout_no_wrap(
-        row.commit.to_short_hex(8),
-        FontId::monospace(11.0),
-        Palette::TEXT_FAINT,
-    );
+fn draw_hash(painter: &Painter, row: &GraphRow, x: f32, center_y: f32, in_focus: bool) -> f32 {
+    let color = focus_aware(Palette::TEXT_FAINT, in_focus);
+    let galley = painter.layout_no_wrap(row.commit.to_short_hex(8), FontId::monospace(11.0), color);
     let size = galley.size();
-    painter.galley(
-        Pos2::new(x, center_y - size.y / 2.0),
-        galley,
-        Palette::TEXT_FAINT,
-    );
+    painter.galley(Pos2::new(x, center_y - size.y / 2.0), galley, color);
     size.x + 10.0
 }
 
@@ -276,6 +328,7 @@ fn draw_summary(
     x: f32,
     center_y: f32,
     right: f32,
+    in_focus: bool,
 ) {
     let Some(commit) = snapshot.commit(&row.commit) else {
         return;
@@ -286,11 +339,14 @@ fn draw_summary(
         return;
     }
 
-    let color = if row.has_dangling_parent {
-        Palette::TEXT_DIM
-    } else {
-        Palette::TEXT
-    };
+    let color = focus_aware(
+        if row.has_dangling_parent {
+            Palette::TEXT_DIM
+        } else {
+            Palette::TEXT
+        },
+        in_focus,
+    );
 
     // One line, ellipsised. A wrapped commit summary would break the fixed row
     // height the virtualization depends on.

@@ -4,15 +4,17 @@ use std::path::PathBuf;
 
 use eframe::egui::{self, RichText};
 
+use super::detail::CommitDetail;
 use super::graph_view::GraphView;
 use super::loader::{self, LoadMessage, PendingLoad};
-use super::sidebar::WorktreePanel;
+use super::sidebar::{PanelAction, WorktreePanel};
 use super::theme::{self, Palette};
 use crate::application::HistoryQuery;
-use crate::domain::{GraphLayout, Oid, RepositorySnapshot};
+use crate::domain::{Ancestry, GraphLayout, Oid, RepositorySnapshot};
 use crate::infrastructure::Git2Backend;
 
 const SIDEBAR_WIDTH: f32 = 250.0;
+const DETAIL_WIDTH: f32 = 320.0;
 
 enum State {
     Loading,
@@ -40,6 +42,13 @@ pub struct GitGuiApp {
     state: State,
     pending: Option<PendingLoad>,
     selected: Option<Oid>,
+    /// The history currently highlighted, computed once when focus changes
+    /// rather than per frame.
+    focus: Option<Ancestry>,
+    /// A row to bring into view on the next frame.
+    scroll_to: Option<usize>,
+    /// A worktree name from `--focus`, consumed once the repository loads.
+    initial_focus: Option<String>,
     capture: Option<Capture>,
 }
 
@@ -49,6 +58,7 @@ impl GitGuiApp {
         repo_path: PathBuf,
         query: HistoryQuery,
         screenshot: Option<PathBuf>,
+        initial_focus: Option<String>,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
 
@@ -66,6 +76,9 @@ impl GitGuiApp {
             state: State::Loading,
             pending: Some(pending),
             selected: None,
+            focus: None,
+            scroll_to: None,
+            initial_focus,
             capture: screenshot.map(|path| Capture {
                 path,
                 settle: 3,
@@ -141,6 +154,46 @@ impl GitGuiApp {
             LoadMessage::Failed(error) => State::Failed(error),
         };
         self.pending = None;
+
+        self.apply_initial_focus();
+    }
+
+    /// Honours `--focus NAME`, once, as soon as there is a repository to look
+    /// the name up in.
+    fn apply_initial_focus(&mut self) {
+        let Some(name) = self.initial_focus.take() else {
+            return;
+        };
+        let State::Ready { snapshot, .. } = &self.state else {
+            return;
+        };
+
+        let Some(tip) = snapshot
+            .worktrees()
+            .iter()
+            .find(|worktree| worktree.dir_name() == name)
+            .and_then(|worktree| worktree.target())
+        else {
+            eprintln!("gitgui: no worktree named {name}");
+            return;
+        };
+
+        self.selected = Some(tip);
+        self.apply(PanelAction::Focus(tip));
+    }
+
+    fn apply(&mut self, action: PanelAction) {
+        let State::Ready { snapshot, .. } = &self.state else {
+            return;
+        };
+
+        match action {
+            PanelAction::Focus(tip) => {
+                self.scroll_to = snapshot.position_of(&tip);
+                self.focus = Some(Ancestry::of(snapshot, tip));
+            }
+            PanelAction::ClearFocus => self.focus = None,
+        }
     }
 
     fn title_bar(&self, ui: &mut egui::Ui) {
@@ -197,8 +250,9 @@ impl eframe::App for GitGuiApp {
             )
             .show(ctx, |ui| self.title_bar(ui));
 
+        let mut action = None;
         if let State::Ready { snapshot, .. } = &self.state {
-            egui::SidePanel::left("worktrees")
+            action = egui::SidePanel::left("worktrees")
                 .resizable(true)
                 .default_width(SIDEBAR_WIDTH)
                 .frame(
@@ -207,7 +261,28 @@ impl eframe::App for GitGuiApp {
                         .inner_margin(egui::Margin::same(10.0)),
                 )
                 .show(ctx, |ui| {
-                    WorktreePanel { snapshot }.show(ui, &mut self.selected);
+                    WorktreePanel {
+                        snapshot,
+                        focused: self.focus.as_ref().map(Ancestry::tip),
+                    }
+                    .show(ui, &mut self.selected)
+                })
+                .inner;
+
+            egui::SidePanel::right("detail")
+                .resizable(true)
+                .default_width(DETAIL_WIDTH)
+                .frame(
+                    egui::Frame::none()
+                        .fill(Palette::PANEL)
+                        .inner_margin(egui::Margin::same(12.0)),
+                )
+                .show(ctx, |ui| {
+                    CommitDetail {
+                        snapshot,
+                        selected: self.selected,
+                    }
+                    .show(ui);
                 });
         }
 
@@ -232,9 +307,23 @@ impl eframe::App for GitGuiApp {
                     });
                 }
                 State::Ready { snapshot, layout } => {
-                    GraphView { snapshot, layout }.show(ui, &mut self.selected);
+                    GraphView {
+                        snapshot,
+                        layout,
+                        focus: self.focus.as_ref(),
+                        scroll_to: self.scroll_to,
+                    }
+                    .show(ui, &mut self.selected);
                 }
             });
+
+        // The jump is a one-shot: leaving it set would pin the scroll position
+        // and make the graph impossible to scroll by hand.
+        self.scroll_to = None;
+
+        if let Some(action) = action {
+            self.apply(action);
+        }
 
         self.drive_capture(ctx);
     }

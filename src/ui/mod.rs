@@ -5,6 +5,7 @@
 //! arrives from a worker thread through [`loader`].
 
 pub mod app;
+pub mod detail;
 pub mod graph_view;
 pub mod loader;
 pub mod sidebar;
