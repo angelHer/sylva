@@ -30,6 +30,9 @@ const CHIP_GAP: f32 = 5.0;
 const CHIP_BUDGET: f32 = 0.5;
 /// Horizontal room a chip's status dot needs.
 const DOT_SPACE: f32 = 11.0;
+/// The narrowest a chip may be drawn: a dot, a glimpse of the name, and the
+/// ellipsis that admits the rest was cut.
+const MIN_CHIP_WIDTH: f32 = 46.0;
 
 /// Horizontal space the graph column needs for a given width in lanes.
 pub fn graph_column_width(lane_count: usize) -> f32 {
@@ -144,7 +147,10 @@ impl GraphView<'_> {
                     let mut hidden = 0usize;
 
                     // Worktree markers come first: they are the point of this
-                    // client, and a branch chip must never push one out.
+                    // client, and a branch chip must never push one out. They
+                    // are shortened rather than dropped when the budget runs
+                    // out, so a repository whose worktree names are long still
+                    // leaves room for the summary.
                     if let Some(worktrees) = worktree_anchors.get(&row.commit) {
                         for worktree in worktrees {
                             let color = focus_aware(worktree_color(worktree), in_focus);
@@ -158,13 +164,18 @@ impl GraphView<'_> {
                                 // from a branch chip at a glance, and it
                                 // carries the state in its colour.
                                 Some(color),
+                                worktree_chip_width(x, chip_limit),
                             );
                         }
                     }
 
                     if let Some(branches) = branch_tips.get(&row.commit) {
                         for branch in branches {
-                            if x > chip_limit {
+                            // A branch that does not fit whole is worth more as
+                            // part of the "+N" count than as a stub: the name is
+                            // the only thing it carries.
+                            let width = chip_width(&painter, &branch.name, false);
+                            if !branch_chip_fits(x, width, chip_limit) {
                                 hidden += 1;
                                 continue;
                             }
@@ -175,18 +186,22 @@ impl GraphView<'_> {
                                 &branch.name,
                                 focus_aware(Palette::CYAN, in_focus),
                                 None,
+                                width,
                             );
                         }
                     }
 
                     if hidden > 0 {
+                        let label = format!("+{hidden}");
+                        let width = chip_width(&painter, &label, false);
                         x += chip(
                             &painter,
                             x,
                             center_y,
-                            &format!("+{hidden}"),
+                            &label,
                             focus_aware(Palette::TEXT_DIM, in_focus),
                             None,
+                            width,
                         );
                     }
 
@@ -305,11 +320,20 @@ fn worktree_color(worktree: &Worktree) -> Color32 {
     }
 }
 
+/// The width a chip wants if nothing constrains it.
+fn chip_width(painter: &Painter, text: &str, has_dot: bool) -> f32 {
+    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(10.5), Palette::TEXT);
+    galley.size().x + 10.0 + if has_dot { DOT_SPACE } else { 0.0 }
+}
+
 /// Draws a rounded label and returns the horizontal space it consumed.
 ///
 /// `dot` draws a filled circle before the text. It is a shape rather than a
 /// character on purpose: the bundled font has no glyph for the symbols this
 /// would otherwise want, and a missing glyph renders as an empty box.
+///
+/// The label is ellipsised to `max_width` rather than overflowing it, which is
+/// what keeps a caller's width budget honest.
 fn chip(
     painter: &Painter,
     x: f32,
@@ -317,9 +341,23 @@ fn chip(
     text: &str,
     color: Color32,
     dot: Option<Color32>,
+    max_width: f32,
 ) -> f32 {
-    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(10.5), color);
     let dot_space = if dot.is_some() { DOT_SPACE } else { 0.0 };
+
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.to_owned(),
+        FontId::proportional(10.5),
+        color,
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: (max_width - 10.0 - dot_space).max(0.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+
+    let galley = painter.layout_job(job);
     let width = galley.size().x + 10.0 + dot_space;
     let rect = Rect::from_min_size(
         Pos2::new(x, center_y - CHIP_HEIGHT / 2.0),
@@ -391,6 +429,24 @@ fn draw_summary(
     painter.galley(Pos2::new(x, center_y - galley.size().y / 2.0), galley, color);
 }
 
+/// How wide a worktree marker starting at `x` may be drawn.
+///
+/// Worktree markers are never dropped, so once the budget is spent they fall
+/// back to a stub rather than disappearing. Before this they ignored the budget
+/// altogether, and a repository with long worktree names left the commit
+/// summary as a bare ellipsis — the one thing the budget exists to prevent.
+fn worktree_chip_width(x: f32, chip_limit: f32) -> f32 {
+    (chip_limit - x).max(MIN_CHIP_WIDTH)
+}
+
+/// Whether a branch chip of `width` still ends inside the budget.
+///
+/// Measured against where the chip *ends*: testing its start let the one chip
+/// straddling the limit through at full width.
+fn branch_chip_fits(x: f32, width: f32, chip_limit: f32) -> bool {
+    x + width <= chip_limit
+}
+
 /// Blends a colour towards the panel background, for strokes that should read
 /// as related to a lane without competing with it.
 fn tint(color: Color32, factor: f32) -> Color32 {
@@ -432,5 +488,34 @@ mod tests {
         let base = Color32::from_rgb(0, 229, 255);
         let tinted = tint(base, 1.0);
         assert_eq!((tinted.r(), tinted.g(), tinted.b()), (0, 229, 255));
+    }
+
+    #[test]
+    fn a_worktree_marker_may_use_what_the_budget_still_allows() {
+        assert_eq!(worktree_chip_width(500.0, 800.0), 300.0);
+    }
+
+    #[test]
+    fn a_worktree_marker_is_shortened_rather_than_dropped_once_the_budget_is_spent() {
+        // The marker still has to appear — this client is about worktrees — but
+        // a stub is what keeps it from eating the commit summary.
+        assert_eq!(worktree_chip_width(900.0, 800.0), MIN_CHIP_WIDTH);
+    }
+
+    #[test]
+    fn a_worktree_marker_never_shrinks_below_the_stub_width() {
+        assert_eq!(worktree_chip_width(790.0, 800.0), MIN_CHIP_WIDTH);
+    }
+
+    #[test]
+    fn a_branch_chip_fits_when_it_ends_inside_the_budget() {
+        assert!(branch_chip_fits(700.0, 100.0, 800.0));
+    }
+
+    #[test]
+    fn a_branch_chip_that_would_cross_the_budget_is_collapsed() {
+        // The old rule tested where the chip *started*, so the one chip that
+        // straddled the limit was still drawn at full width.
+        assert!(!branch_chip_fits(700.0, 200.0, 800.0));
     }
 }
