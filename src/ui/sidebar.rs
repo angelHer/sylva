@@ -289,18 +289,21 @@ fn status_badge(status: &WorktreeStatus) -> (String, Color32) {
         return ("clean".to_string(), Palette::OK);
     }
 
+    // Spelled out rather than written in Git's +/~/? shorthand, for the same
+    // reason divergence_label spells out "ahead": the sidebar has to be
+    // readable by someone who does not already know the notation.
     let mut parts = Vec::new();
     if status.staged > 0 {
-        parts.push(format!("+{}", status.staged));
+        parts.push(format!("{} staged", status.staged));
     }
     if status.unstaged > 0 {
-        parts.push(format!("~{}", status.unstaged));
+        parts.push(format!("{} modified", status.unstaged));
     }
     if status.untracked > 0 {
-        parts.push(format!("?{}", status.untracked));
+        parts.push(format!("{} new", status.untracked));
     }
 
-    (parts.join(" "), Palette::DIRTY)
+    (parts.join(", "), Palette::DIRTY)
 }
 
 /// Ahead/behind against the upstream, or nothing when there is no upstream or
@@ -344,7 +347,7 @@ mod tests {
             conflicted: 0,
         };
         let (text, color) = status_badge(&status);
-        assert_eq!(text, "+1 ~2 ?3");
+        assert_eq!(text, "1 staged, 2 modified, 3 new");
         assert_eq!(color, Palette::DIRTY);
     }
 
@@ -354,7 +357,7 @@ mod tests {
             untracked: 4,
             ..Default::default()
         };
-        assert_eq!(status_badge(&status).0, "?4");
+        assert_eq!(status_badge(&status).0, "4 new");
     }
 
     #[test]
