@@ -28,8 +28,10 @@ const CHIP_GAP: f32 = 5.0;
 /// A commit can carry a dozen refs, and without a limit they squeeze the
 /// message down to an ellipsis — hiding the one thing every row must show.
 const CHIP_BUDGET: f32 = 0.5;
-/// Horizontal room a chip's status dot needs.
-const DOT_SPACE: f32 = 11.0;
+/// Horizontal room a chip's mark needs.
+const MARK_SPACE: f32 = 11.0;
+/// The box a chip's mark is drawn inside.
+const MARK_SIZE: f32 = 8.0;
 /// The narrowest a chip may be drawn: a dot, a glimpse of the name, and the
 /// ellipsis that admits the rest was cut.
 const MIN_CHIP_WIDTH: f32 = 46.0;
@@ -160,10 +162,11 @@ impl GraphView<'_> {
                                 center_y,
                                 worktree.dir_name(),
                                 color,
-                                // The dot is what separates a worktree marker
-                                // from a branch chip at a glance, and it
-                                // carries the state in its colour.
-                                Some(color),
+                                // The mark is what separates a worktree from a
+                                // branch at a glance — the two often carry
+                                // nearly the same name on the same row — and
+                                // its colour still carries the state.
+                                Some(ChipMark::Directory(color)),
                                 worktree_chip_width(x, chip_limit),
                             );
                         }
@@ -174,7 +177,8 @@ impl GraphView<'_> {
                             // A branch that does not fit whole is worth more as
                             // part of the "+N" count than as a stub: the name is
                             // the only thing it carries.
-                            let width = chip_width(&painter, &branch.name, false);
+                            let color = focus_aware(Palette::CYAN, in_focus);
+                            let width = chip_width(&painter, &branch.name, true);
                             if !branch_chip_fits(x, width, chip_limit) {
                                 hidden += 1;
                                 continue;
@@ -184,8 +188,8 @@ impl GraphView<'_> {
                                 x,
                                 center_y,
                                 &branch.name,
-                                focus_aware(Palette::CYAN, in_focus),
-                                None,
+                                color,
+                                Some(ChipMark::Branch(color)),
                                 width,
                             );
                         }
@@ -320,17 +324,85 @@ fn worktree_color(worktree: &Worktree) -> Color32 {
     }
 }
 
+/// The mark drawn at the head of a chip, saying what kind of thing it names.
+///
+/// Shapes rather than characters, for the reason the plain status dot always
+/// was one: the bundled font has no glyph for a folder or a branch, and a
+/// missing glyph renders as an empty box.
+#[derive(Clone, Copy)]
+enum ChipMark {
+    /// A worktree: somewhere on disk. Its colour carries the state of that
+    /// directory, which is the job the bare dot used to do alone.
+    Directory(Color32),
+    /// A branch: a name for a commit, which is not a place.
+    Branch(Color32),
+}
+
+/// Body and tab of the folder mark.
+fn folder_parts(center: Pos2, size: f32) -> (Rect, Rect) {
+    let half = size / 2.0;
+    let tab_height = size * 0.25;
+    let body = Rect::from_min_max(
+        Pos2::new(center.x - half, center.y - half + tab_height),
+        Pos2::new(center.x + half, center.y + half),
+    );
+    let tab = Rect::from_min_max(
+        Pos2::new(center.x - half, center.y - half),
+        Pos2::new(center.x - half + size * 0.45, center.y - half + tab_height),
+    );
+    (body, tab)
+}
+
+/// Root, tip and fork of the branch mark: a trunk with one branch leaving it.
+fn branch_parts(center: Pos2, size: f32) -> (Pos2, Pos2, Pos2) {
+    let half = size / 2.0;
+    let trunk_x = center.x - half + 1.5;
+    (
+        Pos2::new(trunk_x, center.y + half),
+        Pos2::new(trunk_x, center.y - half),
+        Pos2::new(center.x + half, center.y - half + 1.5),
+    )
+}
+
+fn draw_mark(painter: &Painter, mark: ChipMark, center: Pos2) {
+    match mark {
+        ChipMark::Directory(color) => {
+            let (body, tab) = folder_parts(center, MARK_SIZE);
+            painter.rect_filled(body, Rounding::same(1.0_f32), color);
+            painter.rect_filled(tab, Rounding::same(1.0_f32), color);
+        }
+        ChipMark::Branch(color) => {
+            let (root, tip, fork) = branch_parts(center, MARK_SIZE);
+            let stroke = Stroke::new(1.2_f32, color);
+            painter.line_segment([root, tip], stroke);
+
+            // The branch leaves the trunk on a curve, the same way a lane does
+            // in the graph beside it. Both control points sit at the corner, so
+            // it turns once rather than bulging back and closing into a loop.
+            let corner = Pos2::new(root.x, fork.y);
+            painter.add(CubicBezierShape::from_points_stroke(
+                [Pos2::new(root.x, center.y), corner, corner, fork],
+                false,
+                Color32::TRANSPARENT,
+                stroke,
+            ));
+
+            // Three nodes, as the branch glyph is drawn everywhere else. With
+            // only two it reads as a letter rather than a branch.
+            for node in [root, tip, fork] {
+                painter.circle_filled(node, 1.3, color);
+            }
+        }
+    }
+}
+
 /// The width a chip wants if nothing constrains it.
-fn chip_width(painter: &Painter, text: &str, has_dot: bool) -> f32 {
+fn chip_width(painter: &Painter, text: &str, has_mark: bool) -> f32 {
     let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(10.5), Palette::TEXT);
-    galley.size().x + 10.0 + if has_dot { DOT_SPACE } else { 0.0 }
+    galley.size().x + 10.0 + if has_mark { MARK_SPACE } else { 0.0 }
 }
 
 /// Draws a rounded label and returns the horizontal space it consumed.
-///
-/// `dot` draws a filled circle before the text. It is a shape rather than a
-/// character on purpose: the bundled font has no glyph for the symbols this
-/// would otherwise want, and a missing glyph renders as an empty box.
 ///
 /// The label is ellipsised to `max_width` rather than overflowing it, which is
 /// what keeps a caller's width budget honest.
@@ -340,10 +412,10 @@ fn chip(
     center_y: f32,
     text: &str,
     color: Color32,
-    dot: Option<Color32>,
+    mark: Option<ChipMark>,
     max_width: f32,
 ) -> f32 {
-    let dot_space = if dot.is_some() { DOT_SPACE } else { 0.0 };
+    let dot_space = if mark.is_some() { MARK_SPACE } else { 0.0 };
 
     let mut job = egui::text::LayoutJob::simple_singleline(
         text.to_owned(),
@@ -371,8 +443,12 @@ fn chip(
         Stroke::new(1.0_f32, tint(color, 0.45)),
     );
 
-    if let Some(dot_color) = dot {
-        painter.circle_filled(Pos2::new(x + 8.0, center_y), 3.0, dot_color);
+    if let Some(mark) = mark {
+        draw_mark(
+            painter,
+            mark,
+            Pos2::new(x + 5.0 + MARK_SPACE / 2.0, center_y),
+        );
     }
 
     painter.galley(
@@ -510,6 +586,41 @@ mod tests {
     #[test]
     fn a_branch_chip_fits_when_it_ends_inside_the_budget() {
         assert!(branch_chip_fits(700.0, 100.0, 800.0));
+    }
+
+    #[test]
+    fn a_folder_mark_wears_its_tab_on_top_of_its_body() {
+        let (body, tab) = folder_parts(Pos2::new(50.0, 50.0), 8.0);
+        assert_eq!(tab.max.y, body.min.y);
+        assert!(tab.width() < body.width());
+    }
+
+    #[test]
+    fn a_folder_mark_stays_inside_the_space_it_was_given() {
+        let (body, tab) = folder_parts(Pos2::new(50.0, 50.0), 8.0);
+        let bounds = body.union(tab);
+        assert_eq!(bounds.width(), 8.0);
+        assert_eq!(bounds.height(), 8.0);
+    }
+
+    #[test]
+    fn a_branch_mark_forks_upwards_and_to_the_right() {
+        let (root, tip, fork) = branch_parts(Pos2::new(50.0, 50.0), 8.0);
+        // Screen coordinates grow downwards, so the tip is the smaller y.
+        assert!(tip.y < root.y);
+        assert_eq!(tip.x, root.x);
+        assert!(fork.x > root.x);
+        assert!(fork.y < root.y);
+    }
+
+    #[test]
+    fn a_branch_mark_stays_inside_the_space_it_was_given() {
+        let center = Pos2::new(50.0, 50.0);
+        let (root, tip, fork) = branch_parts(center, 8.0);
+        for point in [root, tip, fork] {
+            assert!((point.x - center.x).abs() <= 4.0);
+            assert!((point.y - center.y).abs() <= 4.0);
+        }
     }
 
     #[test]
