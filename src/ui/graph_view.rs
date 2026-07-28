@@ -273,7 +273,7 @@ fn draw_node(painter: &Painter, row: &GraphRow, x: f32, y: f32, in_focus: bool) 
     // separates the node from any line passing behind it. Out of focus there
     // is no halo at all, which is most of what makes the focused history pop.
     if in_focus {
-        painter.circle_filled(center, NODE_RADIUS * 2.4, lane_glow(row.color));
+        painter.circle_filled(center, NODE_RADIUS * 1.7, lane_glow(row.color));
     }
 
     if row.is_merge {

@@ -28,6 +28,14 @@ pub struct Git2Backend {
 }
 
 impl Git2Backend {
+    /// Whether `path` sits inside a repository, without reading any history.
+    ///
+    /// Used to decide whether starting with no arguments means "the repository
+    /// I am standing in" or "show me the welcome screen".
+    pub fn exists_at(path: impl AsRef<Path>) -> bool {
+        Repository::discover(path.as_ref()).is_ok()
+    }
+
     /// Opens the repository containing `path`, walking up to find it.
     ///
     /// If `path` is inside a linked worktree, this resolves back to the
