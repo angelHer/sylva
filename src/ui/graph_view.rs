@@ -151,7 +151,10 @@ impl GraphView<'_> {
                     x += draw_hash(&painter, row, x, center_y, in_focus);
 
                     let chip_limit = x + (rect.right() - x) * CHIP_BUDGET;
-                    let mut hidden = 0usize;
+                    // Kept by name, not counted: a bare "+2" tells the reader
+                    // something is missing without telling them what, which is
+                    // the one question the count provokes.
+                    let mut hidden: Vec<String> = Vec::new();
 
                     // Worktree markers come first: they are the point of this
                     // client, and a branch chip must never push one out. They
@@ -190,7 +193,7 @@ impl GraphView<'_> {
                             let remote = branch.remote.as_deref();
                             let width = chip_width(&painter, &branch.name, remote, true);
                             if !branch_chip_fits(x, width, chip_limit) {
-                                hidden += 1;
+                                hidden.push(branch.label());
                                 continue;
                             }
                             x += chip(
@@ -208,21 +211,47 @@ impl GraphView<'_> {
                         }
                     }
 
-                    if hidden > 0 {
-                        let label = format!("+{hidden}");
-                        let width = chip_width(&painter, &label, None, false);
+                    if !hidden.is_empty() {
+                        let label = format!("+{}", hidden.len());
+                        let color = focus_aware(Palette::TEXT_DIM, in_focus);
+                        let width = chip_width(&painter, &label, None, true);
+                        let chip_rect = Rect::from_min_size(
+                            Pos2::new(x, center_y - CHIP_HEIGHT / 2.0),
+                            Vec2::new(width, CHIP_HEIGHT),
+                        );
+
                         x += chip(
                             &painter,
                             x,
                             center_y,
                             ChipContent {
                                 text: &label,
-                                mark: None,
+                                // Only branches are ever dropped — a worktree
+                                // marker is shortened instead — so the mark says
+                                // what kind of thing the count stands for, which
+                                // a bare "+2" beside a worktree chip does not.
+                                mark: Some(ChipMark::Branch(color)),
                                 remote: None,
                             },
-                            focus_aware(Palette::TEXT_DIM, in_focus),
+                            color,
                             width,
                         );
+
+                        // Registered after the row itself so it sits on top of
+                        // it: the row's own interaction would otherwise swallow
+                        // the pointer and the tooltip would never show. It
+                        // senses clicks as well, and passes them on, so sitting
+                        // over the chip is not a dead spot in the row.
+                        let chip_response = ui
+                            .interact(
+                                chip_rect,
+                                ui.id().with(("hidden refs", index)),
+                                Sense::click(),
+                            )
+                            .on_hover_text(hidden.join("\n"));
+                        if chip_response.clicked() {
+                            *selected = Some(row.commit);
+                        }
                     }
 
                     draw_summary(
@@ -424,6 +453,19 @@ struct BranchChip {
     /// The remotes pointing here, joined for display; `None` when only a local
     /// branch does.
     remote: Option<String>,
+}
+
+impl BranchChip {
+    /// The chip written out as one line, for the listing behind a "+N".
+    ///
+    /// Brackets rather than the drawn divider: a tooltip is plain text, and the
+    /// bundled font has no glyph for a vertical rule.
+    fn label(&self) -> String {
+        match &self.remote {
+            Some(remote) => format!("{} ({remote})", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// Groups one row's branches so a name shared by a local branch and its remotes
@@ -711,6 +753,23 @@ mod tests {
 
     fn chips(branches: &[Branch]) -> Vec<BranchChip> {
         branch_chips(&branches.iter().collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_hidden_local_chip_is_listed_by_its_name_alone() {
+        let chips = chips(&[branch("main", BranchKind::Local)]);
+        assert_eq!(chips[0].label(), "main");
+    }
+
+    #[test]
+    fn a_hidden_chip_carries_its_remote_into_the_listing() {
+        // The divider cannot be drawn in a line of text, and the bundled font
+        // has no glyph for one either.
+        let chips = chips(&[
+            branch("main", BranchKind::Local),
+            branch("origin/main", BranchKind::Remote),
+        ]);
+        assert_eq!(chips[0].label(), "main (origin)");
     }
 
     #[test]
