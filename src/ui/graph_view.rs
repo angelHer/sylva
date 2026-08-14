@@ -11,7 +11,7 @@ use eframe::epaint::CubicBezierShape;
 
 use super::theme::{focus_aware, lane_color, lane_glow, Palette};
 use crate::domain::{
-    Ancestry, GraphLayout, GraphRow, Oid, RepositorySnapshot, Segment, Worktree,
+    Ancestry, Branch, GraphLayout, GraphRow, Oid, RepositorySnapshot, Segment, Worktree,
 };
 
 /// Height of one commit row. Everything vertical is derived from this.
@@ -30,6 +30,11 @@ const CHIP_GAP: f32 = 5.0;
 const CHIP_BUDGET: f32 = 0.5;
 /// Horizontal room a chip's mark needs.
 const MARK_SPACE: f32 = 11.0;
+/// Padding either side of the rule dividing a chip's name from its remote.
+const DIVIDER_PAD: f32 = 6.0;
+/// How far the dividing rule stops short of the chip's edges, so it reads as a
+/// separator inside the chip rather than as a second border.
+const DIVIDER_INSET: f32 = 3.0;
 /// The box a chip's mark is drawn inside.
 const MARK_SIZE: f32 = 8.0;
 /// The narrowest a chip may be drawn: a dot, a glimpse of the name, and the
@@ -146,7 +151,10 @@ impl GraphView<'_> {
                     x += draw_hash(&painter, row, x, center_y, in_focus);
 
                     let chip_limit = x + (rect.right() - x) * CHIP_BUDGET;
-                    let mut hidden = 0usize;
+                    // Kept by name, not counted: a bare "+2" tells the reader
+                    // something is missing without telling them what, which is
+                    // the one question the count provokes.
+                    let mut hidden: Vec<String> = Vec::new();
 
                     // Worktree markers come first: they are the point of this
                     // client, and a branch chip must never push one out. They
@@ -160,53 +168,90 @@ impl GraphView<'_> {
                                 &painter,
                                 x,
                                 center_y,
-                                worktree.dir_name(),
+                                ChipContent {
+                                    text: worktree.dir_name(),
+                                    // The mark is what separates a worktree
+                                    // from a branch at a glance — the two often
+                                    // carry nearly the same name on the same
+                                    // row — and its colour still carries the
+                                    // state.
+                                    mark: Some(ChipMark::Directory(color)),
+                                    remote: None,
+                                },
                                 color,
-                                // The mark is what separates a worktree from a
-                                // branch at a glance — the two often carry
-                                // nearly the same name on the same row — and
-                                // its colour still carries the state.
-                                Some(ChipMark::Directory(color)),
                                 worktree_chip_width(x, chip_limit),
                             );
                         }
                     }
 
                     if let Some(branches) = branch_tips.get(&row.commit) {
-                        for branch in branches {
+                        for branch in branch_chips(branches) {
                             // A branch that does not fit whole is worth more as
                             // part of the "+N" count than as a stub: the name is
                             // the only thing it carries.
                             let color = focus_aware(Palette::CYAN, in_focus);
-                            let width = chip_width(&painter, &branch.name, true);
+                            let remote = branch.remote.as_deref();
+                            let width = chip_width(&painter, &branch.name, remote, true);
                             if !branch_chip_fits(x, width, chip_limit) {
-                                hidden += 1;
+                                hidden.push(branch.label());
                                 continue;
                             }
                             x += chip(
                                 &painter,
                                 x,
                                 center_y,
-                                &branch.name,
+                                ChipContent {
+                                    text: &branch.name,
+                                    mark: Some(ChipMark::Branch(color)),
+                                    remote,
+                                },
                                 color,
-                                Some(ChipMark::Branch(color)),
                                 width,
                             );
                         }
                     }
 
-                    if hidden > 0 {
-                        let label = format!("+{hidden}");
-                        let width = chip_width(&painter, &label, false);
+                    if !hidden.is_empty() {
+                        let label = format!("+{}", hidden.len());
+                        let color = focus_aware(Palette::TEXT_DIM, in_focus);
+                        let width = chip_width(&painter, &label, None, true);
+                        let chip_rect = Rect::from_min_size(
+                            Pos2::new(x, center_y - CHIP_HEIGHT / 2.0),
+                            Vec2::new(width, CHIP_HEIGHT),
+                        );
+
                         x += chip(
                             &painter,
                             x,
                             center_y,
-                            &label,
-                            focus_aware(Palette::TEXT_DIM, in_focus),
-                            None,
+                            ChipContent {
+                                text: &label,
+                                // Only branches are ever dropped — a worktree
+                                // marker is shortened instead — so the mark says
+                                // what kind of thing the count stands for, which
+                                // a bare "+2" beside a worktree chip does not.
+                                mark: Some(ChipMark::Branch(color)),
+                                remote: None,
+                            },
+                            color,
                             width,
                         );
+
+                        // Registered after the row itself so it sits on top of
+                        // it: the row's own interaction would otherwise swallow
+                        // the pointer and the tooltip would never show. It
+                        // senses clicks as well, and passes them on, so sitting
+                        // over the chip is not a dead spot in the row.
+                        let chip_response = ui
+                            .interact(
+                                chip_rect,
+                                ui.id().with(("hidden refs", index)),
+                                Sense::click(),
+                            )
+                            .on_hover_text(hidden.join("\n"));
+                        if chip_response.clicked() {
+                            *selected = Some(row.commit);
+                        }
                     }
 
                     draw_summary(
@@ -396,10 +441,90 @@ fn draw_mark(painter: &Painter, mark: ChipMark, center: Pos2) {
     }
 }
 
+/// One branch chip: a name, and the remotes that agree with it on this row.
+///
+/// A local branch and its remote counterpart sitting on the same commit are one
+/// fact, not two, so they share a chip. When they part company each lands on its
+/// own row, and naming the remote there is what tells the reader which side of
+/// the split they are looking at without hunting for the other row.
+#[derive(Debug, PartialEq, Eq)]
+struct BranchChip {
+    name: String,
+    /// The remotes pointing here, joined for display; `None` when only a local
+    /// branch does.
+    remote: Option<String>,
+}
+
+impl BranchChip {
+    /// The chip written out as one line, for the listing behind a "+N".
+    ///
+    /// Brackets rather than the drawn divider: a tooltip is plain text, and the
+    /// bundled font has no glyph for a vertical rule.
+    fn label(&self) -> String {
+        match &self.remote {
+            Some(remote) => format!("{} ({remote})", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// Groups one row's branches so a name shared by a local branch and its remotes
+/// collapses into a single chip.
+fn branch_chips(branches: &[&Branch]) -> Vec<BranchChip> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+
+    for branch in branches {
+        // A remote ref carrying no remote prefix cannot be attributed to one, so
+        // it gets a group of its own: nothing says it belongs with a local
+        // branch whose name it only appears to share.
+        let Some(remote) = branch.remote_name() else {
+            groups.push((branch.name.clone(), Vec::new()));
+            continue;
+        };
+
+        let name = branch.short_name();
+        let index = match groups.iter().position(|(grouped, _)| grouped == name) {
+            Some(index) => index,
+            None => {
+                groups.push((name.to_owned(), Vec::new()));
+                groups.len() - 1
+            }
+        };
+        groups[index].1.push(remote.to_owned());
+    }
+
+    groups
+        .into_iter()
+        .map(|(name, remotes)| BranchChip {
+            name,
+            remote: (!remotes.is_empty()).then(|| remotes.join(", ")),
+        })
+        .collect()
+}
+
+/// Room the remote half of a chip needs: its rule, the padding either side, and
+/// the remote's own name.
+fn remote_half_width(painter: &Painter, remote: &str) -> f32 {
+    let galley =
+        painter.layout_no_wrap(remote.to_owned(), FontId::proportional(10.5), Palette::TEXT);
+    DIVIDER_PAD * 2.0 + 1.0 + galley.size().x
+}
+
 /// The width a chip wants if nothing constrains it.
-fn chip_width(painter: &Painter, text: &str, has_mark: bool) -> f32 {
+fn chip_width(painter: &Painter, text: &str, remote: Option<&str>, has_mark: bool) -> f32 {
     let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(10.5), Palette::TEXT);
-    galley.size().x + 10.0 + if has_mark { MARK_SPACE } else { 0.0 }
+    galley.size().x
+        + 10.0
+        + if has_mark { MARK_SPACE } else { 0.0 }
+        + remote.map_or(0.0, |remote| remote_half_width(painter, remote))
+}
+
+/// Everything a chip says, as opposed to where and how big it is drawn.
+struct ChipContent<'a> {
+    text: &'a str,
+    mark: Option<ChipMark>,
+    /// The remote sharing this commit, drawn in a second half behind a rule.
+    remote: Option<&'a str>,
 }
 
 /// Draws a rounded label and returns the horizontal space it consumed.
@@ -410,12 +535,15 @@ fn chip(
     painter: &Painter,
     x: f32,
     center_y: f32,
-    text: &str,
+    content: ChipContent<'_>,
     color: Color32,
-    mark: Option<ChipMark>,
     max_width: f32,
 ) -> f32 {
+    let ChipContent { text, mark, remote } = content;
     let dot_space = if mark.is_some() { MARK_SPACE } else { 0.0 };
+    // The remote half keeps its full width when space runs short: it is one
+    // short word, and an ellipsised "or…" would say nothing at all.
+    let remote_space = remote.map_or(0.0, |remote| remote_half_width(painter, remote));
 
     let mut job = egui::text::LayoutJob::simple_singleline(
         text.to_owned(),
@@ -423,14 +551,15 @@ fn chip(
         color,
     );
     job.wrap = egui::text::TextWrapping {
-        max_width: (max_width - 10.0 - dot_space).max(0.0),
+        max_width: (max_width - 10.0 - dot_space - remote_space).max(0.0),
         max_rows: 1,
         break_anywhere: true,
         overflow_character: Some('…'),
     };
 
     let galley = painter.layout_job(job);
-    let width = galley.size().x + 10.0 + dot_space;
+    let name_width = galley.size().x;
+    let width = name_width + 10.0 + dot_space + remote_space;
     let rect = Rect::from_min_size(
         Pos2::new(x, center_y - CHIP_HEIGHT / 2.0),
         Vec2::new(width, CHIP_HEIGHT),
@@ -456,6 +585,28 @@ fn chip(
         galley,
         color,
     );
+
+    if let Some(remote) = remote {
+        let rule_x = x + 5.0 + dot_space + name_width + DIVIDER_PAD;
+        painter.line_segment(
+            [
+                Pos2::new(rule_x, rect.top() + DIVIDER_INSET),
+                Pos2::new(rule_x, rect.bottom() - DIVIDER_INSET),
+            ],
+            Stroke::new(1.0_f32, tint(color, 0.45)),
+        );
+
+        // Dimmer than the branch name: the remote answers "where else is this?",
+        // which is the lesser half of what the chip says.
+        let remote_color = tint(color, 0.75);
+        let galley =
+            painter.layout_no_wrap(remote.to_owned(), FontId::proportional(10.5), remote_color);
+        painter.galley(
+            Pos2::new(rule_x + DIVIDER_PAD + 1.0, center_y - galley.size().y / 2.0),
+            galley,
+            remote_color,
+        );
+    }
 
     width + CHIP_GAP
 }
@@ -533,6 +684,7 @@ fn tint(color: Color32, factor: f32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::BranchKind;
 
     #[test]
     fn the_graph_column_grows_with_the_number_of_lanes() {
@@ -586,6 +738,138 @@ mod tests {
     #[test]
     fn a_branch_chip_fits_when_it_ends_inside_the_budget() {
         assert!(branch_chip_fits(700.0, 100.0, 800.0));
+    }
+
+    fn branch(name: &str, kind: BranchKind) -> Branch {
+        Branch {
+            name: name.into(),
+            kind,
+            target: Oid::zero(),
+            upstream: None,
+            divergence: None,
+            is_head: false,
+        }
+    }
+
+    fn chips(branches: &[Branch]) -> Vec<BranchChip> {
+        branch_chips(&branches.iter().collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_hidden_local_chip_is_listed_by_its_name_alone() {
+        let chips = chips(&[branch("main", BranchKind::Local)]);
+        assert_eq!(chips[0].label(), "main");
+    }
+
+    #[test]
+    fn a_hidden_chip_carries_its_remote_into_the_listing() {
+        // The divider cannot be drawn in a line of text, and the bundled font
+        // has no glyph for one either.
+        let chips = chips(&[
+            branch("main", BranchKind::Local),
+            branch("origin/main", BranchKind::Remote),
+        ]);
+        assert_eq!(chips[0].label(), "main (origin)");
+    }
+
+    #[test]
+    fn a_local_branch_on_its_own_gets_a_chip_with_no_remote_side() {
+        assert_eq!(
+            chips(&[branch("main", BranchKind::Local)]),
+            vec![BranchChip {
+                name: "main".into(),
+                remote: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_local_branch_and_its_remote_on_one_commit_share_a_chip() {
+        let chips = chips(&[
+            branch("main", BranchKind::Local),
+            branch("origin/main", BranchKind::Remote),
+        ]);
+        assert_eq!(
+            chips,
+            vec![BranchChip {
+                name: "main".into(),
+                remote: Some("origin".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_remote_branch_left_behind_still_names_its_remote() {
+        // Its local counterpart is on another row, so this chip is all the
+        // reader has to tell them which side of the split they are looking at.
+        assert_eq!(
+            chips(&[branch("origin/main", BranchKind::Remote)]),
+            vec![BranchChip {
+                name: "main".into(),
+                remote: Some("origin".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn every_remote_agreeing_on_one_commit_is_named() {
+        let chips = chips(&[
+            branch("main", BranchKind::Local),
+            branch("origin/main", BranchKind::Remote),
+            branch("upstream/main", BranchKind::Remote),
+        ]);
+        assert_eq!(
+            chips,
+            vec![BranchChip {
+                name: "main".into(),
+                remote: Some("origin, upstream".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn branches_of_different_names_keep_their_own_chips() {
+        let chips = chips(&[
+            branch("main", BranchKind::Local),
+            branch("origin/feature", BranchKind::Remote),
+        ]);
+        assert_eq!(
+            chips,
+            vec![
+                BranchChip {
+                    name: "main".into(),
+                    remote: None,
+                },
+                BranchChip {
+                    name: "feature".into(),
+                    remote: Some("origin".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn chips_keep_the_order_their_branches_arrived_in() {
+        let chips = chips(&[
+            branch("origin/feature", BranchKind::Remote),
+            branch("main", BranchKind::Local),
+        ]);
+        assert_eq!(chips[0].name, "feature");
+        assert_eq!(chips[1].name, "main");
+    }
+
+    #[test]
+    fn a_remote_branch_carrying_no_remote_prefix_stands_on_its_own() {
+        // `short_name()` hands back the whole name for such a ref, which would
+        // merge it into an unrelated local branch that happens to share it.
+        let chips = chips(&[
+            branch("weird", BranchKind::Local),
+            branch("weird", BranchKind::Remote),
+        ]);
+        assert_eq!(chips.len(), 2);
+        assert!(chips
+            .iter()
+            .all(|chip| chip.name == "weird" && chip.remote.is_none()));
     }
 
     #[test]
