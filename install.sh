@@ -5,8 +5,9 @@
 # Everything goes under $HOME, so no root is needed and nothing outside the
 # user's own directories is touched.
 #
-#   ./install.sh              build and install
-#   ./install.sh --uninstall  remove what this script installed
+#   ./install.sh                            build and install
+#   ./install.sh --uninstall                remove what this script installed
+#   ./install.sh --print-desktop-entry DIR  render the entry for DIR and exit
 #
 set -eu
 
@@ -31,12 +32,56 @@ refresh_desktop_database() {
     fi
 }
 
-if [ "${1:-}" = "--uninstall" ]; then
-    rm -f "$BINARY" "$DESKTOP" "$ICON"
-    refresh_desktop_database
-    echo "sylva: removed $BINARY, $DESKTOP and $ICON"
-    exit 0
-fi
+# Writes the packaged entry to stdout with Exec pointing at $1/sylva.
+#
+# The template names the binary bare, which only works when the *session* PATH
+# has $BIN_DIR on it. A GNOME Wayland session never reads ~/.profile, so on many
+# machines it does not, and GIO drops an entry whose Exec it cannot resolve
+# outright: the launcher does not fail to start, it never appears in the menu at
+# all. Naming the binary in full removes the dependency on the session PATH.
+render_desktop_entry() {
+    binary="$1/sylva"
+
+    case $binary in
+        *[!A-Za-z0-9/._-]*)
+            # The spec wants " and \ backslash-escaped inside the quotes.
+            escaped=$(printf '%s' "$binary" | sed 's/[\\"]/\\&/g')
+            exec_value="\"$escaped\""
+            ;;
+        *) exec_value=$binary ;;
+    esac
+
+    # Passed through the environment rather than awk -v, which would eat the
+    # backslashes the escaping above just added.
+    EXEC_VALUE="$exec_value" awk '
+        /^Exec=/ { print "Exec=" ENVIRON["EXEC_VALUE"] " --welcome %f"; next }
+        { print }
+    ' "$here/packaging/sylva.desktop"
+}
+
+# Anything unrecognised stops here. Falling through to a full build and install
+# is far too surprising a thing to do with an argument nobody asked for.
+case "${1:-}" in
+    "") ;;
+    --uninstall)
+        rm -f "$BINARY" "$DESKTOP" "$ICON"
+        refresh_desktop_database
+        echo "sylva: removed $BINARY, $DESKTOP and $ICON"
+        exit 0
+        ;;
+    --print-desktop-entry)
+        if [ $# -ne 2 ]; then
+            echo "usage: $0 --print-desktop-entry <bin-dir>" >&2
+            exit 2
+        fi
+        render_desktop_entry "$2"
+        exit 0
+        ;;
+    *)
+        echo "$0: unknown option $1" >&2
+        exit 2
+        ;;
+esac
 
 # rustup installs here and asks the shell profile to add it, which a
 # non-interactive shell never reads. Look for it directly before giving up.
@@ -58,7 +103,8 @@ mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR"
 # Copied rather than symlinked: a symlink into target/ breaks the moment
 # `cargo clean` runs, and does so silently.
 install -m 755 "$here/target/release/sylva" "$BINARY"
-install -m 644 "$here/packaging/sylva.desktop" "$DESKTOP"
+render_desktop_entry "$BIN_DIR" > "$DESKTOP"
+chmod 644 "$DESKTOP"
 install -m 644 "$here/packaging/sylva.svg" "$ICON"
 
 refresh_desktop_database
