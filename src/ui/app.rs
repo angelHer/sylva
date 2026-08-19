@@ -16,11 +16,13 @@ use super::theme::{self, Palette};
 use super::welcome::{Welcome, WelcomeAction};
 use super::worktree_form::{FormOutcome, WorktreeForm};
 use crate::application::{
-    AddWorktree, AddWorktreeRequest, HistoryQuery, PruneWorktrees, RemoveWorktree,
-    WorktreeOperations,
+    AddWorktree, AddWorktreeRequest, HistoryQuery, OpenTerminal, PruneWorktrees, RemoveWorktree,
+    TerminalLauncher, WorktreeOperations,
 };
 use crate::domain::{Ancestry, GraphLayout, Oid, RepositorySnapshot};
-use crate::infrastructure::{Git2Backend, GitCli, RecentRepositories, RepositoryWatcher};
+use crate::infrastructure::{
+    Git2Backend, GitCli, RecentRepositories, RepositoryWatcher, SystemTerminal,
+};
 
 const SIDEBAR_WIDTH: f32 = 250.0;
 const DETAIL_WIDTH: f32 = 320.0;
@@ -90,6 +92,13 @@ pub struct SylvaApp {
     /// freeze the window behind it.
     browsing: Option<Task<Option<PathBuf>>>,
     running: Option<Task<OperationResult>>,
+    /// Machine-wide rather than repository-bound, so it is built once in
+    /// [`Self::new`] and never rebuilt or cleared by [`Self::close_repository`].
+    terminal: Arc<SystemTerminal>,
+    /// Kept separate from `running`: a terminal launch is not a Git
+    /// operation, and must not make [`Self::is_busy`] report one, or block a
+    /// reload.
+    opening: Option<Task<Result<(), String>>>,
     status: Option<(String, bool)>,
     watcher: Option<RepositoryWatcher>,
     /// Whether the window had keyboard focus last frame, to notice it coming
@@ -122,6 +131,8 @@ impl SylvaApp {
             confirming: None,
             form: None,
             running: None,
+            terminal: Arc::new(SystemTerminal::new()),
+            opening: None,
             status: None,
             watcher: None,
             was_focused: true,
@@ -366,6 +377,54 @@ impl SylvaApp {
                 self.confirming = None;
                 self.start(Operation::Remove { dir_name, force }, ctx);
             }
+            PanelAction::OpenTerminal(dir_name) => self.open_terminal(dir_name, ctx),
+        }
+    }
+
+    /// Resolves and starts a terminal for a worktree, on a worker thread.
+    ///
+    /// Not routed through [`Self::start`]: a terminal launch is not a Git
+    /// operation, `WorktreeOperations` has nothing to say about it, and a
+    /// running worktree operation must not block it.
+    fn open_terminal(&mut self, dir_name: String, ctx: &egui::Context) {
+        if self.opening.is_some() {
+            return;
+        }
+        let State::Ready { snapshot, .. } = &self.state else {
+            return;
+        };
+
+        let metadata = snapshot.metadata_only();
+        let terminal = Arc::clone(&self.terminal);
+
+        self.opening = Some(background::spawn(
+            move || {
+                let launch = OpenTerminal::new(terminal.as_ref())
+                    .execute(&metadata, &dir_name)
+                    .map_err(|error| error.to_string())?;
+                terminal.start(&launch).map_err(|error| error.to_string())
+            },
+            ctx.clone(),
+        ));
+    }
+
+    /// Reports a failed terminal launch. A success is silent by design: no
+    /// status, no spinner, no repository reload — nothing about the
+    /// repository changed.
+    fn poll_terminal(&mut self, _ctx: &egui::Context) {
+        let Some(opening) = &mut self.opening else {
+            return;
+        };
+
+        let outcome = match opening.poll() {
+            Poll::Pending => return,
+            Poll::Ready(result) => result,
+            Poll::Lost => Err("the terminal could not be started".to_string()),
+        };
+        self.opening = None;
+
+        if let Err(message) = outcome {
+            self.status = Some((message, true));
         }
     }
 
@@ -569,6 +628,7 @@ impl eframe::App for SylvaApp {
         self.poll_load(ctx);
         self.poll_operation(ctx);
         self.poll_browse(ctx);
+        self.poll_terminal(ctx);
         self.poll_for_changes(ctx);
 
         let mut go_home = false;

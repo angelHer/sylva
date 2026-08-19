@@ -23,6 +23,8 @@ pub enum PanelAction {
     Remove { dir_name: String, force: bool },
     /// Back out of a removal.
     CancelRemoval,
+    /// Open a terminal at this worktree's directory.
+    OpenTerminal(String),
 }
 
 pub struct WorktreePanel<'a> {
@@ -74,7 +76,10 @@ impl WorktreePanel<'_> {
                 // gone, so it destroys nothing and needs no confirmation.
                 let stale = worktrees.iter().filter(|wt| wt.is_prunable).count();
                 if ui
-                    .add_enabled(stale > 0, egui::Button::new(RichText::new("prune").size(10.5)))
+                    .add_enabled(
+                        stale > 0,
+                        egui::Button::new(RichText::new("prune").size(10.5)),
+                    )
                     .on_hover_text(format!("{stale} stale record(s)"))
                     .clicked()
                 {
@@ -86,7 +91,11 @@ impl WorktreePanel<'_> {
         if self.focused.is_some() {
             ui.add_space(2.0);
             if ui
-                .button(RichText::new("show all history").color(Palette::CYAN).size(10.5))
+                .button(
+                    RichText::new("show all history")
+                        .color(Palette::CYAN)
+                        .size(10.5),
+                )
                 .clicked()
             {
                 action = Some(PanelAction::ClearFocus);
@@ -197,17 +206,7 @@ impl WorktreePanel<'_> {
                     }
                 });
 
-                if is_confirming {
-                    action = confirmation(ui, worktree);
-                } else if !worktree.is_primary {
-                    ui.add_space(4.0);
-                    ui.add_enabled_ui(!self.busy, |ui| {
-                        if ui.button(RichText::new("remove").size(10.5)).clicked() {
-                            action =
-                                Some(PanelAction::AskToRemove(worktree.dir_name().to_string()));
-                        }
-                    });
-                }
+                action = self.actions(ui, worktree);
             })
             .response
             .interact(egui::Sense::click());
@@ -233,6 +232,43 @@ impl WorktreePanel<'_> {
 
         None
     }
+
+    /// The row of buttons at the foot of a card: removal (confirmed in two
+    /// steps) and a terminal, offered on every card including the primary
+    /// one.
+    fn actions(&self, ui: &mut Ui, worktree: &Worktree) -> Option<PanelAction> {
+        if self.confirming == Some(worktree.dir_name()) {
+            return confirmation(ui, worktree);
+        }
+
+        let mut action = None;
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if !worktree.is_primary {
+                ui.add_enabled_ui(!self.busy, |ui| {
+                    if ui.button(RichText::new("remove").size(10.5)).clicked() {
+                        action = Some(PanelAction::AskToRemove(worktree.dir_name().to_string()));
+                    }
+                });
+            }
+
+            // Deliberately outside the `!self.busy` guard above: opening a
+            // terminal is not a Git operation, so a worktree operation
+            // running in the background must not block it.
+            if ui
+                .add_enabled(
+                    !worktree.is_prunable,
+                    egui::Button::new(RichText::new("terminal").size(10.5)),
+                )
+                .on_disabled_hover_text("gone; prune it instead")
+                .clicked()
+            {
+                action = Some(PanelAction::OpenTerminal(worktree.dir_name().to_string()));
+            }
+        });
+
+        action
+    }
 }
 
 /// The second step of a removal, which says plainly what is about to be lost.
@@ -249,16 +285,22 @@ fn confirmation(ui: &mut Ui, worktree: &Worktree) -> Option<PanelAction> {
 
     if dirty > 0 {
         ui.label(
-            RichText::new(format!("{dirty} uncommitted file(s) would be lost for good"))
-                .color(Palette::DANGER)
-                .size(10.5)
-                .strong(),
+            RichText::new(format!(
+                "{dirty} uncommitted file(s) would be lost for good"
+            ))
+            .color(Palette::DANGER)
+            .size(10.5)
+            .strong(),
         );
     }
 
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        let label = if dirty > 0 { "discard and delete" } else { "delete" };
+        let label = if dirty > 0 {
+            "discard and delete"
+        } else {
+            "delete"
+        };
         if ui
             .button(RichText::new(label).color(Palette::DANGER).size(10.5))
             .clicked()
