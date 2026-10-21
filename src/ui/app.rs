@@ -18,7 +18,7 @@ use super::welcome::{Welcome, WelcomeAction};
 use super::worktree_form::{FormOutcome, WorktreeForm};
 use crate::application::{
     AddWorktree, AddWorktreeRequest, HistoryQuery, OpenTerminal, PruneWorktrees, RemoveWorktree,
-    TerminalLauncher, WorktreeOperations,
+    TerminalLauncher, UncommittedEntry, WorktreeOperations,
 };
 use crate::domain::{Ancestry, GraphLayout, Oid, RepositorySnapshot};
 use crate::infrastructure::{
@@ -71,8 +71,8 @@ type OperationResult = Result<String, String>;
 struct Confirmation {
     dir_name: String,
     /// `None` until Git has answered.
-    at_risk: Option<usize>,
-    checking: Option<Task<Result<usize, String>>>,
+    at_risk: Option<Vec<UncommittedEntry>>,
+    checking: Option<Task<Result<Vec<UncommittedEntry>, String>>>,
 }
 
 pub struct SylvaApp {
@@ -479,7 +479,7 @@ impl SylvaApp {
         confirmation.checking = None;
 
         match outcome {
-            Ok(count) => confirmation.at_risk = Some(count),
+            Ok(entries) => confirmation.at_risk = Some(entries),
             // Without an answer there is nothing honest to confirm.
             Err(message) => {
                 self.confirming = None;
@@ -829,7 +829,8 @@ impl eframe::App for SylvaApp {
                 .find(|worktree| worktree.dir_name() == confirmation.dir_name)
             {
                 Some(worktree) => {
-                    if let Some(chosen) = removal_dialog::show(ctx, worktree, confirmation.at_risk)
+                    if let Some(chosen) =
+                        removal_dialog::show(ctx, worktree, confirmation.at_risk.as_deref())
                     {
                         action = Some(chosen);
                     }

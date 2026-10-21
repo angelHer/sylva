@@ -12,6 +12,6 @@ pub use load_repository::LoadRepository;
 pub use open_terminal::{Launch, OpenTerminal, TerminalError, TerminalLauncher, TerminalRequest};
 pub use ports::{CommitPage, GitError, HistoryQuery, RepositoryReader, WorktreeReader};
 pub use worktree_ops::{
-    AddWorktree, AddWorktreeRequest, PruneWorktrees, RemoveWorktree, WorktreeOpError,
-    WorktreeOperations,
+    AddWorktree, AddWorktreeRequest, ChangeKind, PruneWorktrees, RemoveWorktree, UncommittedEntry,
+    WorktreeOpError, WorktreeOperations,
 };

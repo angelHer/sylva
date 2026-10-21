@@ -89,14 +89,14 @@ pub trait WorktreeOperations: Send + Sync {
     /// Removes a linked worktree. `force` discards uncommitted work.
     fn remove(&self, path: &Path, force: bool) -> Result<(), GitError>;
 
-    /// How many entries Git itself counts as uncommitted in a worktree: the
-    /// ones it would refuse to delete without `force`.
+    /// The entries Git itself counts as uncommitted in a worktree: the ones it
+    /// would refuse to delete without `force`.
     ///
     /// Asked of Git rather than read from the snapshot because the two can
     /// disagree, and Git is the one that decides. A symlinked `node_modules`
     /// under a `node_modules/` ignore rule is clean to libgit2, which follows
     /// the link, and untracked to Git, which does not.
-    fn uncommitted_changes(&self, path: &Path) -> Result<usize, GitError>;
+    fn uncommitted_changes(&self, path: &Path) -> Result<Vec<UncommittedEntry>, GitError>;
 
     /// Drops the administrative records of worktrees whose directories are
     /// gone. Returns how many were pruned.
@@ -107,6 +107,41 @@ pub trait WorktreeOperations: Send + Sync {
     /// Behind the port because it is a question about the world, and because
     /// the tests for the guards must be able to answer it without a disk.
     fn path_is_free(&self, path: &Path) -> bool;
+}
+
+/// One path Git counts as uncommitted, so a confirmation can name what would
+/// be lost rather than only count it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncommittedEntry {
+    /// Relative to the worktree, as Git prints it. An untracked directory is
+    /// one entry, not every file inside it.
+    pub path: String,
+    pub change: ChangeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    New,
+    Modified,
+    Staged,
+    Deleted,
+    Renamed,
+    Conflicted,
+}
+
+impl ChangeKind {
+    /// Spelled out, like the sidebar's status badge, rather than Git's
+    /// two-letter codes.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Modified => "modified",
+            Self::Staged => "staged",
+            Self::Deleted => "deleted",
+            Self::Renamed => "renamed",
+            Self::Conflicted => "conflicted",
+        }
+    }
 }
 
 pub struct AddWorktree<'a> {
@@ -173,13 +208,13 @@ impl<'a> RemoveWorktree<'a> {
         Self { operations }
     }
 
-    /// How many uncommitted entries removing this worktree would discard, as
-    /// Git counts them. This is what a confirmation should warn about.
+    /// The uncommitted entries removing this worktree would discard, as Git
+    /// sees them. This is what a confirmation should warn about.
     pub fn changes_at_risk(
         &self,
         snapshot: &RepositorySnapshot,
         dir_name: &str,
-    ) -> Result<usize, WorktreeOpError> {
+    ) -> Result<Vec<UncommittedEntry>, WorktreeOpError> {
         let worktree = Self::removable(snapshot, dir_name)?;
         Ok(self.operations.uncommitted_changes(&worktree.path)?)
     }
@@ -198,7 +233,7 @@ impl<'a> RemoveWorktree<'a> {
         let worktree = Self::removable(snapshot, dir_name)?;
 
         if !force {
-            let files = self.operations.uncommitted_changes(&worktree.path)?;
+            let files = self.operations.uncommitted_changes(&worktree.path)?.len();
             if files > 0 {
                 return Err(WorktreeOpError::HasUncommittedChanges {
                     worktree: worktree.dir_name().to_string(),
@@ -273,8 +308,13 @@ mod tests {
             Ok(())
         }
 
-        fn uncommitted_changes(&self, _path: &Path) -> Result<usize, GitError> {
-            Ok(self.uncommitted)
+        fn uncommitted_changes(&self, _path: &Path) -> Result<Vec<UncommittedEntry>, GitError> {
+            Ok((0..self.uncommitted)
+                .map(|index| UncommittedEntry {
+                    path: format!("file-{index}.txt"),
+                    change: ChangeKind::Modified,
+                })
+                .collect())
         }
 
         fn prune(&self) -> Result<usize, GitError> {

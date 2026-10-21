@@ -17,18 +17,9 @@ pub fn click<R>(name: &str, mut frame: impl FnMut(&egui::Context) -> Option<R>) 
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
 
-    // A window spends its first frame measuring itself, invisible, and only
-    // takes its anchored place on a later one: positions are read once the
-    // layout has settled, or the click lands where the button used to be.
-    let mut settled = None;
-    for _ in 0..3 {
-        settled = Some(ctx.run(input(vec![]), |ctx| {
-            frame(ctx);
-        }));
-    }
-    let target = settled
-        .and_then(|output| centre_of(&output, name))
-        .unwrap_or_else(|| panic!("nothing on screen is named {name:?}"));
+    let settled = settle(&ctx, &mut frame);
+    let target =
+        centre_of(&settled, name).unwrap_or_else(|| panic!("nothing on screen is named {name:?}"));
 
     let mut result = None;
     for event in [
@@ -43,6 +34,35 @@ pub fn click<R>(name: &str, mut frame: impl FnMut(&egui::Context) -> Option<R>) 
         });
     }
     result
+}
+
+/// Draws `frame` until its layout settles and reports, for each name, whether
+/// anything on screen carries it.
+pub fn shows<R, const N: usize>(
+    names: &[&str; N],
+    mut frame: impl FnMut(&egui::Context) -> Option<R>,
+) -> [bool; N] {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+
+    let output = settle(&ctx, &mut frame);
+    names.map(|name| centre_of(&output, name).is_some())
+}
+
+fn settle<R>(
+    ctx: &egui::Context,
+    frame: &mut impl FnMut(&egui::Context) -> Option<R>,
+) -> egui::FullOutput {
+    // A window spends its first frame measuring itself, invisible, and only
+    // takes its anchored place on a later one: positions are read once the
+    // layout has settled, or the click lands where the button used to be.
+    let mut output = None;
+    for _ in 0..3 {
+        output = Some(ctx.run(input(vec![]), |ctx| {
+            frame(ctx);
+        }));
+    }
+    output.expect("at least one frame ran")
 }
 
 fn input(events: Vec<egui::Event>) -> egui::RawInput {

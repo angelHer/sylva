@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sylva::application::worktree_ops::{
-    AddWorktree, AddWorktreeRequest, PruneWorktrees, RemoveWorktree, WorktreeOpError,
-    WorktreeOperations,
+    AddWorktree, AddWorktreeRequest, ChangeKind, PruneWorktrees, RemoveWorktree, UncommittedEntry,
+    WorktreeOpError, WorktreeOperations,
 };
 use sylva::application::{HistoryQuery, LoadRepository};
 use sylva::domain::{default_worktree_path, BranchName, RepositorySnapshot};
@@ -267,7 +267,11 @@ fn the_changes_at_risk_are_the_ones_git_sees() {
         .expect("git answers");
 
     assert_eq!(
-        changes, 1,
+        changes,
+        vec![UncommittedEntry {
+            path: "node_modules".to_string(),
+            change: ChangeKind::New,
+        }],
         "the symlink is untracked as far as git is concerned"
     );
 }
