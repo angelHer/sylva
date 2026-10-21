@@ -67,6 +67,14 @@ enum Operation {
 /// The outcome of an operation, in words meant for the status bar.
 type OperationResult = Result<String, String>;
 
+/// A removal waiting on the user, and on Git's count of what it would discard.
+struct Confirmation {
+    dir_name: String,
+    /// `None` until Git has answered.
+    at_risk: Option<usize>,
+    checking: Option<Task<Result<usize, String>>>,
+}
+
 pub struct SylvaApp {
     /// `None` until a repository is chosen, which is how the window opens when
     /// started from a desktop launcher.
@@ -82,7 +90,7 @@ pub struct SylvaApp {
     /// A worktree name from `--focus`, consumed once the repository loads.
     initial_focus: Option<String>,
     /// The worktree awaiting a removal confirmation.
-    confirming: Option<String>,
+    confirming: Option<Confirmation>,
     form: Option<WorktreeForm>,
     /// Bound to the open repository, so it exists only once there is one.
     operations: Option<Arc<GitCli>>,
@@ -372,7 +380,7 @@ impl SylvaApp {
             PanelAction::ClearFocus => self.focus = None,
             PanelAction::NewWorktree => self.form = Some(WorktreeForm::default()),
             PanelAction::Prune => self.start(Operation::Prune, ctx),
-            PanelAction::AskToRemove(dir_name) => self.confirming = Some(dir_name),
+            PanelAction::AskToRemove(dir_name) => self.ask_to_remove(dir_name, ctx),
             PanelAction::CancelRemoval => self.confirming = None,
             PanelAction::Remove { dir_name, force } => {
                 self.confirming = None;
@@ -426,6 +434,57 @@ impl SylvaApp {
 
         if let Err(message) = outcome {
             self.status = Some((message, true));
+        }
+    }
+
+    /// Opens the removal confirmation and asks Git, on a worker thread, how
+    /// much uncommitted work the removal would discard.
+    fn ask_to_remove(&mut self, dir_name: String, ctx: &egui::Context) {
+        let (State::Ready { snapshot, .. }, Some(operations)) = (&self.state, &self.operations)
+        else {
+            return;
+        };
+
+        let metadata = snapshot.metadata_only();
+        let operations = Arc::clone(operations);
+        let name = dir_name.clone();
+
+        self.confirming = Some(Confirmation {
+            dir_name,
+            at_risk: None,
+            checking: Some(background::spawn(
+                move || {
+                    RemoveWorktree::new(operations.as_ref())
+                        .changes_at_risk(&metadata, &name)
+                        .map_err(|error| error.to_string())
+                },
+                ctx.clone(),
+            )),
+        });
+    }
+
+    fn poll_removal_check(&mut self) {
+        let Some(confirmation) = &mut self.confirming else {
+            return;
+        };
+        let Some(checking) = &mut confirmation.checking else {
+            return;
+        };
+
+        let outcome = match checking.poll() {
+            Poll::Pending => return,
+            Poll::Ready(result) => result,
+            Poll::Lost => Err("could not ask git about uncommitted work".to_string()),
+        };
+        confirmation.checking = None;
+
+        match outcome {
+            Ok(count) => confirmation.at_risk = Some(count),
+            // Without an answer there is nothing honest to confirm.
+            Err(message) => {
+                self.confirming = None;
+                self.status = Some((message, true));
+            }
         }
     }
 
@@ -630,6 +689,7 @@ impl eframe::App for SylvaApp {
         self.poll_operation(ctx);
         self.poll_browse(ctx);
         self.poll_terminal(ctx);
+        self.poll_removal_check();
         self.poll_for_changes(ctx);
 
         let mut go_home = false;
@@ -668,7 +728,10 @@ impl eframe::App for SylvaApp {
                     WorktreePanel {
                         snapshot,
                         focused: self.focus.as_ref().map(Ancestry::tip),
-                        confirming: self.confirming.as_deref(),
+                        confirming: self
+                            .confirming
+                            .as_ref()
+                            .map(|confirmation| confirmation.dir_name.as_str()),
                         busy: self.running.is_some(),
                     }
                     .show(ui, &mut self.selected)
@@ -758,14 +821,16 @@ impl eframe::App for SylvaApp {
             }
         }
 
-        if let (Some(dir_name), State::Ready { snapshot, .. }) = (&self.confirming, &self.state) {
+        if let (Some(confirmation), State::Ready { snapshot, .. }) = (&self.confirming, &self.state)
+        {
             match snapshot
                 .worktrees()
                 .iter()
-                .find(|worktree| worktree.dir_name() == dir_name)
+                .find(|worktree| worktree.dir_name() == confirmation.dir_name)
             {
                 Some(worktree) => {
-                    if let Some(chosen) = removal_dialog::show(ctx, worktree) {
+                    if let Some(chosen) = removal_dialog::show(ctx, worktree, confirmation.at_risk)
+                    {
                         action = Some(chosen);
                     }
                 }

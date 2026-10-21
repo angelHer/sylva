@@ -98,6 +98,27 @@ impl WorktreeOperations for GitCli {
         Ok(())
     }
 
+    fn uncommitted_changes(&self, path: &Path) -> Result<usize, GitError> {
+        // The same question `git worktree remove` asks before refusing, so the
+        // count matches its verdict: an entry here is one it would not delete.
+        let output = self.run(
+            "status",
+            [
+                OsStr::new("-C"),
+                path.as_os_str(),
+                OsStr::new("status"),
+                OsStr::new("--porcelain"),
+                OsStr::new("--ignore-submodules=none"),
+            ],
+        )?;
+
+        Ok(output
+            .stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count())
+    }
+
     fn prune(&self) -> Result<usize, GitError> {
         // `--verbose` makes git name each record it drops, one per line. It
         // writes those lines to stderr, not stdout, and they are translated
