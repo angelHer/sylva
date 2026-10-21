@@ -9,7 +9,10 @@ pub mod background;
 pub mod detail;
 pub mod graph_view;
 pub mod loader;
+pub mod removal_dialog;
 pub mod sidebar;
+#[cfg(test)]
+mod testing;
 pub mod theme;
 pub mod welcome;
 pub mod worktree_form;
