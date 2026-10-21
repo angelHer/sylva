@@ -4,10 +4,12 @@
 //! `infrastructure` implements. It never names a concrete Git backend.
 
 pub mod load_repository;
+pub mod open_terminal;
 pub mod ports;
 pub mod worktree_ops;
 
 pub use load_repository::LoadRepository;
+pub use open_terminal::{Launch, OpenTerminal, TerminalError, TerminalLauncher, TerminalRequest};
 pub use ports::{CommitPage, GitError, HistoryQuery, RepositoryReader, WorktreeReader};
 pub use worktree_ops::{
     AddWorktree, AddWorktreeRequest, PruneWorktrees, RemoveWorktree, WorktreeOpError,
