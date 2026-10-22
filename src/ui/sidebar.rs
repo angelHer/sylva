@@ -155,61 +155,71 @@ impl WorktreePanel<'_> {
 
         let mut action = None;
 
-        let response = frame
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
+        // The card senses clicks through `UiBuilder::sense`, which registers
+        // it beneath its own widgets. Calling `interact` on the frame once it
+        // was drawn did the opposite: egui hands a click to the last widget
+        // registered under the pointer, so the card took every click meant
+        // for its buttons and "remove" and "terminal" only ever focused it.
+        let response = ui
+            .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                // Selectable text senses clicks too, and now that the card sits
+                // beneath its contents a click on the name would select it
+                // instead of focusing the worktree.
+                ui.style_mut().interaction.selectable_labels = false;
+                frame.show(ui, |ui| {
+                    ui.set_width(ui.available_width());
 
-                ui.horizontal(|ui| {
-                    // The primary checkout is the one the repository itself
-                    // sits in; everything else is a linked worktree.
-                    if worktree.is_primary {
-                        // A drawn marker, not a character: no glyph risk.
-                        let (dot, _) =
-                            ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 3.5, Palette::CYAN);
-                    }
+                    ui.horizontal(|ui| {
+                        // The primary checkout is the one the repository itself
+                        // sits in; everything else is a linked worktree.
+                        if worktree.is_primary {
+                            // A drawn marker, not a character: no glyph risk.
+                            let (dot, _) =
+                                ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 3.5, Palette::CYAN);
+                        }
+                        ui.label(
+                            RichText::new(worktree.dir_name())
+                                .color(Palette::TEXT)
+                                .size(12.5)
+                                .strong(),
+                        );
+                    });
+
                     ui.label(
-                        RichText::new(worktree.dir_name())
-                            .color(Palette::TEXT)
-                            .size(12.5)
-                            .strong(),
+                        RichText::new(worktree.head.label())
+                            .color(if worktree.head.is_detached() {
+                                Palette::DIRTY
+                            } else {
+                                Palette::TEXT_DIM
+                            })
+                            .size(11.0)
+                            .monospace(),
                     );
+
+                    ui.horizontal_wrapped(|ui| {
+                        let (text, color) = status_badge(&worktree.status);
+                        ui.label(RichText::new(text).color(color).size(10.5));
+
+                        if let Some(label) = divergence_label(worktree.divergence) {
+                            ui.label(RichText::new(label).color(Palette::TEXT_DIM).size(10.5));
+                        }
+
+                        if worktree.is_locked {
+                            ui.label(RichText::new("locked").color(Palette::TEXT_DIM).size(10.5));
+                        }
+                        if worktree.is_prunable {
+                            ui.label(RichText::new("prunable").color(Palette::DANGER).size(10.5));
+                        }
+                        if is_focused {
+                            ui.label(RichText::new("focused").color(Palette::CYAN).size(10.5));
+                        }
+                    });
+
+                    action = self.actions(ui, worktree);
                 });
-
-                ui.label(
-                    RichText::new(worktree.head.label())
-                        .color(if worktree.head.is_detached() {
-                            Palette::DIRTY
-                        } else {
-                            Palette::TEXT_DIM
-                        })
-                        .size(11.0)
-                        .monospace(),
-                );
-
-                ui.horizontal_wrapped(|ui| {
-                    let (text, color) = status_badge(&worktree.status);
-                    ui.label(RichText::new(text).color(color).size(10.5));
-
-                    if let Some(label) = divergence_label(worktree.divergence) {
-                        ui.label(RichText::new(label).color(Palette::TEXT_DIM).size(10.5));
-                    }
-
-                    if worktree.is_locked {
-                        ui.label(RichText::new("locked").color(Palette::TEXT_DIM).size(10.5));
-                    }
-                    if worktree.is_prunable {
-                        ui.label(RichText::new("prunable").color(Palette::DANGER).size(10.5));
-                    }
-                    if is_focused {
-                        ui.label(RichText::new("focused").color(Palette::CYAN).size(10.5));
-                    }
-                });
-
-                action = self.actions(ui, worktree);
             })
-            .response
-            .interact(egui::Sense::click());
+            .response;
 
         // A button inside the card wins over the card's own click.
         if action.is_some() {
@@ -233,14 +243,10 @@ impl WorktreePanel<'_> {
         None
     }
 
-    /// The row of buttons at the foot of a card: removal (confirmed in two
-    /// steps) and a terminal, offered on every card including the primary
-    /// one.
+    /// The row of buttons at the foot of a card: removal (confirmed in a
+    /// window, see [`super::removal_dialog`]) and a terminal, offered on every
+    /// card including the primary one.
     fn actions(&self, ui: &mut Ui, worktree: &Worktree) -> Option<PanelAction> {
-        if self.confirming == Some(worktree.dir_name()) {
-            return confirmation(ui, worktree);
-        }
-
         let mut action = None;
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -269,55 +275,6 @@ impl WorktreePanel<'_> {
 
         action
     }
-}
-
-/// The second step of a removal, which says plainly what is about to be lost.
-fn confirmation(ui: &mut Ui, worktree: &Worktree) -> Option<PanelAction> {
-    let mut action = None;
-    let dirty = worktree.status.total_changed();
-
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new(format!("Delete {}?", worktree.path.display()))
-            .color(Palette::TEXT)
-            .size(10.5),
-    );
-
-    if dirty > 0 {
-        ui.label(
-            RichText::new(format!(
-                "{dirty} uncommitted file(s) would be lost for good"
-            ))
-            .color(Palette::DANGER)
-            .size(10.5)
-            .strong(),
-        );
-    }
-
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        let label = if dirty > 0 {
-            "discard and delete"
-        } else {
-            "delete"
-        };
-        if ui
-            .button(RichText::new(label).color(Palette::DANGER).size(10.5))
-            .clicked()
-        {
-            action = Some(PanelAction::Remove {
-                dir_name: worktree.dir_name().to_string(),
-                // Forcing is exactly what the user just agreed to, and only
-                // that: a clean worktree is still removed without it.
-                force: dirty > 0,
-            });
-        }
-        if ui.button(RichText::new("cancel").size(10.5)).clicked() {
-            action = Some(PanelAction::CancelRemoval);
-        }
-    });
-
-    action
 }
 
 /// One-line summary of a working directory's state, with the colour it should
@@ -371,7 +328,83 @@ fn divergence_label(divergence: Option<Divergence>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::domain::WorktreeHead;
+    use crate::ui::testing::click;
+
+    fn linked(name: &str, status: WorktreeStatus) -> Worktree {
+        Worktree {
+            name: name.into(),
+            path: PathBuf::from(format!("/home/dev/project-worktrees/{name}")),
+            is_primary: false,
+            head: WorktreeHead::Detached {
+                target: Oid::from_bytes([2; 20]),
+            },
+            status,
+            divergence: None,
+            is_locked: false,
+            is_prunable: false,
+        }
+    }
+
+    fn snapshot(worktrees: Vec<Worktree>) -> RepositorySnapshot {
+        RepositorySnapshot::new(
+            PathBuf::from("/home/dev/project"),
+            vec![],
+            vec![],
+            worktrees,
+            false,
+        )
+    }
+
+    /// Clicks the widget named `name` in a panel showing `snapshot`.
+    fn click_in_panel(snapshot: &RepositorySnapshot, name: &str) -> Option<PanelAction> {
+        click(name, |ctx| {
+            egui::CentralPanel::default()
+                .show(ctx, |ui| {
+                    WorktreePanel {
+                        snapshot,
+                        focused: None,
+                        confirming: None,
+                        busy: false,
+                    }
+                    .show(ui, &mut None)
+                })
+                .inner
+        })
+    }
+
+    #[test]
+    fn the_remove_button_asks_for_confirmation() {
+        let snapshot = snapshot(vec![linked("feature-graph", WorktreeStatus::default())]);
+
+        assert_eq!(
+            click_in_panel(&snapshot, "remove"),
+            Some(PanelAction::AskToRemove("feature-graph".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_terminal_button_opens_a_terminal() {
+        let snapshot = snapshot(vec![linked("feature-graph", WorktreeStatus::default())]);
+
+        assert_eq!(
+            click_in_panel(&snapshot, "terminal"),
+            Some(PanelAction::OpenTerminal("feature-graph".to_string()))
+        );
+    }
+
+    #[test]
+    fn clicking_the_card_itself_still_focuses_its_history() {
+        let snapshot = snapshot(vec![linked("feature-graph", WorktreeStatus::default())]);
+
+        assert_eq!(
+            click_in_panel(&snapshot, "feature-graph"),
+            Some(PanelAction::Focus(Oid::from_bytes([2; 20])))
+        );
+    }
 
     #[test]
     fn a_clean_worktree_reads_as_clean() {

@@ -11,6 +11,7 @@ use super::background::{self, Poll, Task};
 use super::detail::CommitDetail;
 use super::graph_view::GraphView;
 use super::loader::{self, LoadMessage, PendingLoad};
+use super::removal_dialog;
 use super::sidebar::{PanelAction, WorktreePanel};
 use super::theme::{self, Palette};
 use super::welcome::{Welcome, WelcomeAction};
@@ -754,6 +755,23 @@ impl eframe::App for SylvaApp {
                 FormOutcome::Open => {}
                 FormOutcome::Cancelled => self.form = None,
                 FormOutcome::Submit(request) => self.start(Operation::Add(request), ctx),
+            }
+        }
+
+        if let (Some(dir_name), State::Ready { snapshot, .. }) = (&self.confirming, &self.state) {
+            match snapshot
+                .worktrees()
+                .iter()
+                .find(|worktree| worktree.dir_name() == dir_name)
+            {
+                Some(worktree) => {
+                    if let Some(chosen) = removal_dialog::show(ctx, worktree) {
+                        action = Some(chosen);
+                    }
+                }
+                // Removed from outside while the question was open: there is
+                // nothing left to confirm.
+                None => action = Some(PanelAction::CancelRemoval),
             }
         }
 
