@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::application::ports::GitError;
-use crate::application::worktree_ops::{AddWorktreeRequest, WorktreeOperations};
+use crate::application::worktree_ops::{
+    AddWorktreeRequest, ChangeKind, UncommittedEntry, WorktreeOperations,
+};
 
 pub struct GitCli {
     root: PathBuf,
@@ -98,6 +100,26 @@ impl WorktreeOperations for GitCli {
         Ok(())
     }
 
+    fn uncommitted_changes(&self, path: &Path) -> Result<Vec<UncommittedEntry>, GitError> {
+        // The same question `git worktree remove` asks before refusing, so the
+        // count matches its verdict: an entry here is one it would not delete.
+        let output = self.run(
+            "status",
+            [
+                OsStr::new("-C"),
+                path.as_os_str(),
+                OsStr::new("status"),
+                OsStr::new("--porcelain"),
+                // NUL-separated, so paths arrive unquoted and a space or a
+                // newline in a name cannot split an entry.
+                OsStr::new("-z"),
+                OsStr::new("--ignore-submodules=none"),
+            ],
+        )?;
+
+        Ok(parse_porcelain(&output.stdout))
+    }
+
     fn prune(&self) -> Result<usize, GitError> {
         // `--verbose` makes git name each record it drops, one per line. It
         // writes those lines to stderr, not stdout, and they are translated
@@ -122,9 +144,79 @@ impl WorktreeOperations for GitCli {
     }
 }
 
+/// Reads `git status --porcelain -z`: one `XY path` field per entry, where a
+/// rename or copy is followed by a second field holding its old path.
+fn parse_porcelain(output: &str) -> Vec<UncommittedEntry> {
+    let mut fields = output.split('\0').filter(|field| !field.is_empty());
+    let mut entries = Vec::new();
+
+    while let Some(field) = fields.next() {
+        let mut code = field.chars();
+        let (Some(index), Some(worktree), Some(path)) = (code.next(), code.next(), field.get(3..))
+        else {
+            continue;
+        };
+
+        let change = match (index, worktree) {
+            ('?', '?') => ChangeKind::New,
+            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => ChangeKind::Conflicted,
+            ('R' | 'C', _) => {
+                fields.next();
+                ChangeKind::Renamed
+            }
+            ('D', _) | (_, 'D') => ChangeKind::Deleted,
+            (_, 'M' | 'T') => ChangeKind::Modified,
+            _ => ChangeKind::Staged,
+        };
+
+        entries.push(UncommittedEntry {
+            path: path.to_string(),
+            change,
+        });
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(path: &str, change: ChangeKind) -> UncommittedEntry {
+        UncommittedEntry {
+            path: path.to_string(),
+            change,
+        }
+    }
+
+    #[test]
+    fn porcelain_entries_are_read_in_the_words_the_sidebar_uses() {
+        let output = "?? notes.txt\0 M src/main.rs\0M  staged.rs\0 D gone.rs\0UU clash.rs\0";
+
+        assert_eq!(
+            parse_porcelain(output),
+            vec![
+                entry("notes.txt", ChangeKind::New),
+                entry("src/main.rs", ChangeKind::Modified),
+                entry("staged.rs", ChangeKind::Staged),
+                entry("gone.rs", ChangeKind::Deleted),
+                entry("clash.rs", ChangeKind::Conflicted),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rename_is_one_entry_under_its_new_name() {
+        // With -z a rename carries its old path as a second, separate field.
+        let output = "R  new name.rs\0ab\0?? after.txt\0";
+
+        assert_eq!(
+            parse_porcelain(output),
+            vec![
+                entry("new name.rs", ChangeKind::Renamed),
+                entry("after.txt", ChangeKind::New),
+            ]
+        );
+    }
 
     #[test]
     fn a_path_that_does_not_exist_is_free() {

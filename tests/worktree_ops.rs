@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sylva::application::worktree_ops::{
-    AddWorktree, AddWorktreeRequest, PruneWorktrees, RemoveWorktree, WorktreeOpError,
-    WorktreeOperations,
+    AddWorktree, AddWorktreeRequest, ChangeKind, PruneWorktrees, RemoveWorktree, UncommittedEntry,
+    WorktreeOpError, WorktreeOperations,
 };
 use sylva::application::{HistoryQuery, LoadRepository};
 use sylva::domain::{default_worktree_path, BranchName, RepositorySnapshot};
@@ -232,6 +232,80 @@ fn forcing_removes_a_worktree_that_holds_uncommitted_work() {
         .expect("forcing removes it");
 
     assert!(!request.path.exists());
+}
+
+/// A worktree whose `node_modules` is a symlink, under a `.gitignore` that
+/// names it as a directory. Git does not follow the link, so the rule does not
+/// match and the link is untracked; libgit2 follows it, matches the rule, and
+/// reports the worktree clean. Git is the one that decides whether a removal
+/// goes ahead.
+fn worktree_with_a_linked_node_modules(fixture: &Fixture) -> PathBuf {
+    fs::write(fixture.root.join(".gitignore"), "node_modules/\n").expect("write");
+    fs::create_dir(fixture.root.join("node_modules")).expect("mkdir");
+    fixture.git(&["add", ".gitignore"]);
+    fixture.git(&["commit", "-m", "ignore node_modules"]);
+
+    let request = fixture.request("feature", true);
+    AddWorktree::new(&fixture.cli())
+        .execute(&fixture.snapshot(), &request)
+        .expect("created");
+    std::os::unix::fs::symlink(
+        fixture.root.join("node_modules"),
+        request.path.join("node_modules"),
+    )
+    .expect("symlink");
+    request.path
+}
+
+#[test]
+fn the_changes_at_risk_are_the_ones_git_sees() {
+    let fixture = Fixture::new();
+    worktree_with_a_linked_node_modules(&fixture);
+
+    let changes = RemoveWorktree::new(&fixture.cli())
+        .changes_at_risk(&fixture.snapshot(), "wt-feature")
+        .expect("git answers");
+
+    assert_eq!(
+        changes,
+        vec![UncommittedEntry {
+            path: "node_modules".to_string(),
+            change: ChangeKind::New,
+        }],
+        "the symlink is untracked as far as git is concerned"
+    );
+}
+
+#[test]
+fn a_removal_git_would_refuse_is_reported_as_uncommitted_work() {
+    let fixture = Fixture::new();
+    let path = worktree_with_a_linked_node_modules(&fixture);
+
+    let error = RemoveWorktree::new(&fixture.cli())
+        .execute(&fixture.snapshot(), "wt-feature", false)
+        .expect_err("git refuses an unforced removal");
+
+    match error {
+        WorktreeOpError::HasUncommittedChanges { files, .. } => assert_eq!(files, 1),
+        other => panic!("expected HasUncommittedChanges, got {other:?}"),
+    }
+    assert!(path.exists(), "nothing was deleted");
+}
+
+#[test]
+fn forcing_removes_a_worktree_only_git_considers_dirty() {
+    let fixture = Fixture::new();
+    let path = worktree_with_a_linked_node_modules(&fixture);
+
+    RemoveWorktree::new(&fixture.cli())
+        .execute(&fixture.snapshot(), "wt-feature", true)
+        .expect("forcing removes it");
+
+    assert!(!path.exists());
+    assert!(
+        fixture.root.join("node_modules").is_dir(),
+        "the link's target is untouched"
+    );
 }
 
 #[test]

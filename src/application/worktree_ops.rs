@@ -9,7 +9,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::domain::{BranchName, RepositorySnapshot};
+use crate::domain::{BranchName, RepositorySnapshot, Worktree};
 
 use super::ports::GitError;
 
@@ -89,6 +89,15 @@ pub trait WorktreeOperations: Send + Sync {
     /// Removes a linked worktree. `force` discards uncommitted work.
     fn remove(&self, path: &Path, force: bool) -> Result<(), GitError>;
 
+    /// The entries Git itself counts as uncommitted in a worktree: the ones it
+    /// would refuse to delete without `force`.
+    ///
+    /// Asked of Git rather than read from the snapshot because the two can
+    /// disagree, and Git is the one that decides. A symlinked `node_modules`
+    /// under a `node_modules/` ignore rule is clean to libgit2, which follows
+    /// the link, and untracked to Git, which does not.
+    fn uncommitted_changes(&self, path: &Path) -> Result<Vec<UncommittedEntry>, GitError>;
+
     /// Drops the administrative records of worktrees whose directories are
     /// gone. Returns how many were pruned.
     fn prune(&self) -> Result<usize, GitError>;
@@ -98,6 +107,41 @@ pub trait WorktreeOperations: Send + Sync {
     /// Behind the port because it is a question about the world, and because
     /// the tests for the guards must be able to answer it without a disk.
     fn path_is_free(&self, path: &Path) -> bool;
+}
+
+/// One path Git counts as uncommitted, so a confirmation can name what would
+/// be lost rather than only count it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncommittedEntry {
+    /// Relative to the worktree, as Git prints it. An untracked directory is
+    /// one entry, not every file inside it.
+    pub path: String,
+    pub change: ChangeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    New,
+    Modified,
+    Staged,
+    Deleted,
+    Renamed,
+    Conflicted,
+}
+
+impl ChangeKind {
+    /// Spelled out, like the sidebar's status badge, rather than Git's
+    /// two-letter codes.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Modified => "modified",
+            Self::Staged => "staged",
+            Self::Deleted => "deleted",
+            Self::Renamed => "renamed",
+            Self::Conflicted => "conflicted",
+        }
+    }
 }
 
 pub struct AddWorktree<'a> {
@@ -164,6 +208,17 @@ impl<'a> RemoveWorktree<'a> {
         Self { operations }
     }
 
+    /// The uncommitted entries removing this worktree would discard, as Git
+    /// sees them. This is what a confirmation should warn about.
+    pub fn changes_at_risk(
+        &self,
+        snapshot: &RepositorySnapshot,
+        dir_name: &str,
+    ) -> Result<Vec<UncommittedEntry>, WorktreeOpError> {
+        let worktree = Self::removable(snapshot, dir_name)?;
+        Ok(self.operations.uncommitted_changes(&worktree.path)?)
+    }
+
     /// Removes the worktree with this directory name.
     ///
     /// `force` is the caller confirming that uncommitted work may be
@@ -175,6 +230,26 @@ impl<'a> RemoveWorktree<'a> {
         dir_name: &str,
         force: bool,
     ) -> Result<(), WorktreeOpError> {
+        let worktree = Self::removable(snapshot, dir_name)?;
+
+        if !force {
+            let files = self.operations.uncommitted_changes(&worktree.path)?.len();
+            if files > 0 {
+                return Err(WorktreeOpError::HasUncommittedChanges {
+                    worktree: worktree.dir_name().to_string(),
+                    files,
+                });
+            }
+        }
+
+        self.operations.remove(&worktree.path, force)?;
+        Ok(())
+    }
+
+    fn removable<'s>(
+        snapshot: &'s RepositorySnapshot,
+        dir_name: &str,
+    ) -> Result<&'s Worktree, WorktreeOpError> {
         let worktree = snapshot
             .worktrees()
             .iter()
@@ -184,16 +259,7 @@ impl<'a> RemoveWorktree<'a> {
         if worktree.is_primary {
             return Err(WorktreeOpError::CannotRemovePrimary);
         }
-
-        if worktree.status.is_dirty() && !force {
-            return Err(WorktreeOpError::HasUncommittedChanges {
-                worktree: worktree.dir_name().to_string(),
-                files: worktree.status.total_changed(),
-            });
-        }
-
-        self.operations.remove(&worktree.path, force)?;
-        Ok(())
+        Ok(worktree)
     }
 }
 
@@ -228,6 +294,7 @@ mod tests {
         added: Mutex<Vec<AddWorktreeRequest>>,
         removed: Mutex<Vec<(PathBuf, bool)>>,
         pruned: Mutex<usize>,
+        uncommitted: usize,
     }
 
     impl WorktreeOperations for FakeOperations {
@@ -239,6 +306,15 @@ mod tests {
         fn remove(&self, path: &Path, force: bool) -> Result<(), GitError> {
             self.removed.lock().unwrap().push((path.to_path_buf(), force));
             Ok(())
+        }
+
+        fn uncommitted_changes(&self, _path: &Path) -> Result<Vec<UncommittedEntry>, GitError> {
+            Ok((0..self.uncommitted)
+                .map(|index| UncommittedEntry {
+                    path: format!("file-{index}.txt"),
+                    change: ChangeKind::Modified,
+                })
+                .collect())
         }
 
         fn prune(&self) -> Result<usize, GitError> {
@@ -442,11 +518,11 @@ mod tests {
 
     #[test]
     fn a_worktree_holding_uncommitted_work_is_refused_and_says_how_much() {
-        let operations = FakeOperations::default();
-        let mut dirty = worktree("feature", false, Some("feature"));
-        dirty.status.unstaged = 2;
-        dirty.status.untracked = 1;
-        let snap = snapshot(vec![], vec![dirty]);
+        let operations = FakeOperations {
+            uncommitted: 3,
+            ..Default::default()
+        };
+        let snap = snapshot(vec![], vec![worktree("feature", false, Some("feature"))]);
 
         let error = RemoveWorktree::new(&operations)
             .execute(&snap, "feature", false)
@@ -461,10 +537,11 @@ mod tests {
 
     #[test]
     fn a_dirty_worktree_is_removed_only_when_the_caller_forces_it() {
-        let operations = FakeOperations::default();
-        let mut dirty = worktree("feature", false, Some("feature"));
-        dirty.status.unstaged = 2;
-        let snap = snapshot(vec![], vec![dirty]);
+        let operations = FakeOperations {
+            uncommitted: 2,
+            ..Default::default()
+        };
+        let snap = snapshot(vec![], vec![worktree("feature", false, Some("feature"))]);
 
         RemoveWorktree::new(&operations)
             .execute(&snap, "feature", true)
